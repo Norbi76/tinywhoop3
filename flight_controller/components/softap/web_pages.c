@@ -1,12 +1,7 @@
-/* Embedded webpage served by the ESP SoftAP
- * Contains a joystick UI and a small WebSocket client that sends
- * joystick {x,y} JSON to ws://<device>/ws
- */
+/* web_pages.c - embedded web page for the softap component */
+#include "web_pages.h"
 
-#ifndef WEB_PAGES_H
-#define WEB_PAGES_H
-
-static const char index_html[] =
+const char index_html[] =
     "<!DOCTYPE html>"
     "<html>"
     "<head>"
@@ -56,5 +51,3 @@ static const char index_html[] =
       "</script>"
     "</body>"
     "</html>";
-
-#endif /* WEB_PAGES_H */
