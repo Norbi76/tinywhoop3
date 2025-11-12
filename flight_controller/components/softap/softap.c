@@ -15,7 +15,7 @@
 #include "web_pages.h"
 #include "sdkconfig.h"
 #include "esp_heap_caps.h"
-#include "driver/ledc.h"
+#include "led_pwm.h"
 #include "cJSON.h"
 
 static const char *TAG = "softap_component";
@@ -32,48 +32,9 @@ static const char *TAG = "softap_component";
 #define LEDC_DUTY_RES           LEDC_TIMER_8_BIT
 #define LEDC_FREQUENCY          (5000)
 
-/* Initialize LED PWM (LEDC) */
-static void ledc_init_pwm(void)
-{
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .timer_num        = LEDC_TIMER,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .freq_hz          = LEDC_FREQUENCY,
-        .clk_cfg          = LEDC_AUTO_CLK,
-    };
-    esp_err_t err = ledc_timer_config(&ledc_timer);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ledc_timer_config failed: %d", err);
-    }
-
-    ledc_channel_config_t ledc_channel = {
-        .gpio_num       = LEDC_OUTPUT_IO,
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .timer_sel      = LEDC_TIMER,
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    err = ledc_channel_config(&ledc_channel);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "ledc_channel_config failed: %d", err);
-    }
-}
 
 /* Map normalized joystick Y [-1..1] to PWM duty [0..max] and apply it */
-static void set_led_brightness(float normY)
-{
-    if (normY < -1.0f) normY = -1.0f;
-    if (normY >  1.0f) normY =  1.0f;
-    /* map -1..1 -> 0..1 */
-    float v = (normY + 1.0f) * 0.5f;
-    uint32_t max_duty = (1 << LEDC_DUTY_RES) - 1;
-    uint32_t duty = (uint32_t)(v * (float)max_duty + 0.5f);
-    ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, duty);
-    ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
-}
+/* LED control moved to separate component 'led_pwm' */
 
 /* Parse joystick JSON (supports either {"x":..,"y":..} or
    {"j1": {"x":..,"y":..}, "j2":{...}}) and act on it.
@@ -94,7 +55,9 @@ static void process_joystick_json(const char *buf)
         float jx = (float)xitem->valuedouble;
         float jy = (float)yitem->valuedouble;
         ESP_LOGI(TAG, "Parsed single joystick JSON: x=%f y=%f", jx, jy);
-        set_led_brightness(jy);
+        /* Map single joystick to channel 0 (x) and channel 1 (y) for backward compatibility */
+        led_pwm_set_channel_brightness(0, jx);
+        led_pwm_set_channel_brightness(1, jy);
         cJSON_Delete(root);
         return;
     }
@@ -105,12 +68,13 @@ static void process_joystick_json(const char *buf)
     if (j1 && cJSON_IsObject(j1)) {
         cJSON *jx = cJSON_GetObjectItem(j1, "x");
         cJSON *jy = cJSON_GetObjectItem(j1, "y");
-        if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
+            if (cJSON_IsNumber(jx) && cJSON_IsNumber(jy)) {
             float j1x = (float)jx->valuedouble;
             float j1y = (float)jy->valuedouble;
             ESP_LOGI(TAG, "Parsed j1: x=%f y=%f", j1x, j1y);
-            /* use j1.y for brightness mapping */
-            set_led_brightness(j1y);
+            /* Map j1.x -> channel 0, j1.y -> channel 1 */
+            led_pwm_set_channel_brightness(0, j1x);
+            led_pwm_set_channel_brightness(1, j1y);
         }
     }
     if (j2 && cJSON_IsObject(j2)) {
@@ -120,7 +84,9 @@ static void process_joystick_json(const char *buf)
             float j2x = (float)jx2->valuedouble;
             float j2y = (float)jy2->valuedouble;
             ESP_LOGI(TAG, "Parsed j2: x=%f y=%f", j2x, j2y);
-            /* if you want to act on j2, do it here */
+            /* Map j2.x -> channel 2, j2.y -> channel 3 */
+            led_pwm_set_channel_brightness(2, j2x);
+            led_pwm_set_channel_brightness(3, j2y);
         }
     }
 
@@ -276,7 +242,7 @@ void softap_init(void)
     const char *ssid = "TinyWhoopAP";
     const char *password = "tinywhoop123";
     /* initialize LED PWM hardware so joystick Y can control brightness */
-    ledc_init_pwm();
+    led_pwm_init();
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
