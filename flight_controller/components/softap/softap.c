@@ -87,6 +87,7 @@ static void process_joystick_json(const char *buf)
             /* Map j2.x -> channel 2, j2.y -> channel 3 */
             led_pwm_set_channel_brightness(2, j2x);
             led_pwm_set_channel_brightness(3, j2y);
+            //TODO: modify how the values are handled
         }
     }
 
