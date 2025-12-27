@@ -23,3 +23,4 @@ void app_main(void)
 		vTaskDelay(pdMS_TO_TICKS(10000));
 	}
 }
+//TODO: can t use both joysticks at the same time on mobile, figure out why

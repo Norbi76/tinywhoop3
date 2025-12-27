@@ -224,7 +224,9 @@ static httpd_handle_t start_webserver_internal(void)
 {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
     ESP_LOGI(TAG, "Starting HTTP Server");
+
     if (httpd_start(&server, &config) == ESP_OK) {
     httpd_register_uri_handler(server, &hello);
 #if defined(CONFIG_ESP_HTTP_SERVER_WS) || defined(CONFIG_HTTPD_WS_SUPPORT)
@@ -235,6 +237,7 @@ static httpd_handle_t start_webserver_internal(void)
 #endif
     httpd_register_uri_handler(server, &joy_uri);
     }
+    
     return server;
 }
 
