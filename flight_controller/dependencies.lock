@@ -1,5 +1,5 @@
 dependencies:
-  espressif/cJSON:
+  espressif/cjson:
     component_hash: 9372811fb197926f522c467627cf4a8e72b681e0366e17879631da801103aef3
     dependencies:
     - name: idf
@@ -12,10 +12,10 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 6.0.0
 direct_dependencies:
-- espressif/cJSON
+- espressif/cjson
 - idf
 manifest_hash: 67a457718a3b3cb206e122b6946d05b7c63ba9fd523dd53bfc8925a4a062f006
 target: esp32s3
-version: 2.0.0
+version: 3.0.0
