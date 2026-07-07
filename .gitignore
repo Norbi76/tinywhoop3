@@ -2,3 +2,4 @@
 /flight_controller/.vscode
 /flight_controller/managed_components
 .vscode
+*.zip
