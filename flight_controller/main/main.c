@@ -5,7 +5,7 @@
 
 static const char *TAG = "FC_MAIN";
 
-void fc_task(void *pvParameters) {
+void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un param de tip void*
     //init imu, pwm
     ESP_LOGI(TAG, "Flight controll task started on core %d", xPortGetCoreID());
 
@@ -23,7 +23,7 @@ void fc_task(void *pvParameters) {
     }
 }
 
-void telemetry_rx_task(void *pvParameters) {
+void telemetry_rx_task(void *args) {
     //init uart...
     ESP_LOGI(TAG, "Telemtry transmission task started on core %d", xPortGetCoreID());
 
