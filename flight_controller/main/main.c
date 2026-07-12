@@ -2,12 +2,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "imu_driver.h"
 
 static const char *TAG = "FC_MAIN";
 
 void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un param de tip void*
-    //init imu, pwm
     ESP_LOGI(TAG, "Flight controll task started on core %d", xPortGetCoreID());
+    //init imu, pwm
+    imu_setup(); //needs error handling
 
     const TickType_t xFreq = pdMS_TO_TICKS(1); // 1ms -> 1kHz
     TickType_t xLastWakeTime = xTaskGetTickCount();
