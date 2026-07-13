@@ -1,11 +1,13 @@
 #include "imu_driver.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "IMU";
 
-#define I2C_MASTER_SDA 5
-#define I2C_MASTER_SCL 6
+#define I2C_MASTER_SDA 12
+#define I2C_MASTER_SCL 11
 
 #define I2C_MASTER_FREQ_HZ 400000
 #define IMU_ADDR 0x68
@@ -21,6 +23,7 @@ static const char *TAG = "IMU";
 #define REG_WHO_AM_I     0x75 // Identificatorul senzorului
 
 static i2c_master_dev_handle_t imu_handle;
+static i2c_master_bus_handle_t imu_bus_handle;
 
 static esp_err_t imu_write_reg(uint8_t reg_addr, uint8_t data) {
     uint8_t write_buf[2] = {reg_addr, data};
@@ -32,6 +35,11 @@ static esp_err_t imu_read_reg(uint8_t reg_addr, uint8_t *data_buffer, size_t len
 }
 
 esp_err_t imu_setup(void) {
+    if (imu_handle != NULL) {
+        return ESP_OK;
+    }
+    //previne initializarea multipla a magistralei i2c si al senzorului imu
+
     //configurarea magistralei
     i2c_master_bus_config_t i2c_bus_config = {
         .i2c_port = I2C_NUM_0,
@@ -41,9 +49,8 @@ esp_err_t imu_setup(void) {
         .glitch_ignore_cnt = 7, //valoare tipica utilizata mentionata in documentatia structurii
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus_handle;
 
-    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_config, &bus_handle));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_config, &imu_bus_handle));
 
     //configurarea senzorului
     i2c_device_config_t imu_config = {
@@ -52,7 +59,14 @@ esp_err_t imu_setup(void) {
         .scl_speed_hz = I2C_MASTER_FREQ_HZ,
     };
 
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &imu_config, &imu_handle));
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(imu_bus_handle, &imu_config, &imu_handle));
+
+    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x80));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x01));
+    ESP_ERROR_CHECK(imu_write_reg(REG_CONFIG, 0x03));
+    ESP_ERROR_CHECK(imu_write_reg(REG_GYRO_CONFIG, 0x00));
+    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x00));
 
     uint8_t who_am_i = 0;
     esp_err_t error;
@@ -68,6 +82,28 @@ esp_err_t imu_setup(void) {
 
     ESP_LOGI(TAG, "IMU MPU 6500 found at address 0x%x", IMU_ADDR);
     
+
+    return ESP_OK;
+}
+
+esp_err_t imu_read_raw_data(imu_raw_data_t *data) {
+    if (data == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t raw_data[14];
+    esp_err_t error = imu_read_reg(REG_ACCEL_XOUT_H, raw_data, sizeof(raw_data));
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read IMU data: %s", esp_err_to_name(error));
+        return error;
+    }
+
+    data->acc_x = (int16_t)((raw_data[0] << 8) | raw_data[1]);
+    data->acc_y = (int16_t)((raw_data[2] << 8) | raw_data[3]);
+    data->acc_z = (int16_t)((raw_data[4] << 8) | raw_data[5]);
+    data->gyro_x = (int16_t)((raw_data[8] << 8) | raw_data[9]);
+    data->gyro_y = (int16_t)((raw_data[10] << 8) | raw_data[11]);
+    data->gyro_z = (int16_t)((raw_data[12] << 8) | raw_data[13]);
 
     return ESP_OK;
 }

@@ -9,3 +9,4 @@ typedef struct {
 
 esp_err_t imu_setup(void);
 esp_err_t imu_read_raw_data(imu_raw_data_t *data);
+//functie pentru calibrare

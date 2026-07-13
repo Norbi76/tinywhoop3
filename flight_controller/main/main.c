@@ -9,14 +9,30 @@ static const char *TAG = "FC_MAIN";
 void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un param de tip void*
     ESP_LOGI(TAG, "Flight controll task started on core %d", xPortGetCoreID());
     //init imu, pwm
-    imu_setup(); //needs error handling
+    esp_err_t error = imu_setup(); 
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "IMU setup failed: %s", esp_err_to_name(error));
+        vTaskDelete(NULL);
+        return;
+    }
 
     const TickType_t xFreq = pdMS_TO_TICKS(1); // 1ms -> 1kHz
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
 
+    imu_raw_data_t imu_data;
     for (;;) {
-        // 1. Citește giroscop / accelerometru
+        error = imu_read_raw_data(&imu_data);
+        if (error != ESP_OK) {
+            ESP_LOGE(TAG, "IMU read failed: %s", esp_err_to_name(error));
+            vTaskDelay(pdMS_TO_TICKS(10)); // wait a bit before retrying
+            continue;
+        }
+
+        ESP_LOGI(TAG, "IMU Data - Acc: (%d, %d, %d), Gyro: (%d, %d, %d)",
+                 imu_data.acc_x, imu_data.acc_y, imu_data.acc_z,
+                 imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+                 
         // 2. Calculează PID
         // 3. Scrie comanda PWM către motoarele coreless
 
