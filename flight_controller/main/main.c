@@ -16,22 +16,27 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         return;
     }
 
-    const TickType_t xFreq = pdMS_TO_TICKS(1); // 1ms -> 1kHz
+    const TickType_t xFreq = pdMS_TO_TICKS(1000); // 1ms -> 1kHz
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
 
-    imu_raw_data_t imu_data;
+    imu_raw_data_t imu_raw_data;
+    imu_physical_data_t imu_physical_data;
     for (;;) {
-        error = imu_read_raw_data(&imu_data);
+        error = imu_read_raw_data(&imu_raw_data);
         if (error != ESP_OK) {
             ESP_LOGE(TAG, "IMU read failed: %s", esp_err_to_name(error));
             vTaskDelay(pdMS_TO_TICKS(10)); // wait a bit before retrying
             continue;
         }
+        imu_convert_raw_to_physical(&imu_raw_data, &imu_physical_data);
 
-        ESP_LOGI(TAG, "IMU Data - Acc: (%d, %d, %d), Gyro: (%d, %d, %d)",
-                 imu_data.acc_x, imu_data.acc_y, imu_data.acc_z,
-                 imu_data.gyro_x, imu_data.gyro_y, imu_data.gyro_z);
+
+        ESP_LOGI(TAG, "IMU Data - Acc: (%.2f, %.2f, %.2f), Gyro: (%.2f, %.2f, %.2f), Temp: %.2f",
+        imu_physical_data.acc_x_g, imu_physical_data.acc_y_g, imu_physical_data.acc_z_g,
+        imu_physical_data.gyro_x_dps, imu_physical_data.gyro_y_dps, imu_physical_data.gyro_z_dps,
+        imu_physical_data.temp_C
+        );
                  
         // 2. Calculează PID
         // 3. Scrie comanda PWM către motoarele coreless

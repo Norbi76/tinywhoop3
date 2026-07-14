@@ -22,6 +22,15 @@ static const char *TAG = "IMU";
 #define REG_PWR_MGMT_1   0x6B // Power Management (Wake-up)
 #define REG_WHO_AM_I     0x75 // Identificatorul senzorului
 
+#define RoomTemp_Offset 0.0f //conform datasheet
+#define Temp_Sensitivity  333.87f //conform datasheet
+
+#define Gyro_Sensitivity 16.4f
+#define Acc_Sensitivity 4096.0f 
+//imu are un ADC pe 16 biti -> poate reprezenta valori pana 65535 sau [-32768, +32767]
+//acc are scala setata la +/-8g -> sensibilitatea = 32768 / 8 = 4096
+//gyro are scala setata la 2000dps -> sensibilitatea = 32768 / 2000 ~ 16.4
+
 static i2c_master_dev_handle_t imu_handle;
 static i2c_master_bus_handle_t imu_bus_handle;
 
@@ -61,12 +70,12 @@ esp_err_t imu_setup(void) {
 
     ESP_ERROR_CHECK(i2c_master_bus_add_device(imu_bus_handle, &imu_config, &imu_handle));
 
-    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x80));
-    vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x01));
-    ESP_ERROR_CHECK(imu_write_reg(REG_CONFIG, 0x03));
-    ESP_ERROR_CHECK(imu_write_reg(REG_GYRO_CONFIG, 0x00));
-    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x00));
+    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x80)); // reseteaza imu
+    vTaskDelay(pdMS_TO_TICKS(100)); // timp de asteptare dupa reset conform datasheet ului 
+    ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x01)); // selectarea automat cea mai buna sursa de clk
+    ESP_ERROR_CHECK(imu_write_reg(REG_CONFIG, 0x03)); // DLPF la 41 Hz
+    ESP_ERROR_CHECK(imu_write_reg(REG_GYRO_CONFIG, 0x18)); // +/- 2000dps
+    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x10)); // +- 8g
 
     uint8_t who_am_i = 0;
     esp_err_t error;
@@ -91,19 +100,32 @@ esp_err_t imu_read_raw_data(imu_raw_data_t *data) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint8_t raw_data[14];
+    uint8_t raw_data[14]; //14 registrii pentru acc, gyto si temp
     esp_err_t error = imu_read_reg(REG_ACCEL_XOUT_H, raw_data, sizeof(raw_data));
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "Failed to read IMU data: %s", esp_err_to_name(error));
         return error;
     }
 
-    data->acc_x = (int16_t)((raw_data[0] << 8) | raw_data[1]);
-    data->acc_y = (int16_t)((raw_data[2] << 8) | raw_data[3]);
-    data->acc_z = (int16_t)((raw_data[4] << 8) | raw_data[5]);
-    data->gyro_x = (int16_t)((raw_data[8] << 8) | raw_data[9]);
-    data->gyro_y = (int16_t)((raw_data[10] << 8) | raw_data[11]);
-    data->gyro_z = (int16_t)((raw_data[12] << 8) | raw_data[13]);
+    data->acc_x_raw = (int16_t)((raw_data[0] << 8) | raw_data[1]);
+    data->acc_y_raw = (int16_t)((raw_data[2] << 8) | raw_data[3]);
+    data->acc_z_raw = (int16_t)((raw_data[4] << 8) | raw_data[5]);
+    data->temp_raw = (int16_t)((raw_data[6] << 8) | raw_data[7]);
+    data->gyro_x_raw = (int16_t)((raw_data[8] << 8) | raw_data[9]);
+    data->gyro_y_raw = (int16_t)((raw_data[10] << 8) | raw_data[11]);
+    data->gyro_z_raw = (int16_t)((raw_data[12] << 8) | raw_data[13]);
 
     return ESP_OK;
+}
+
+void imu_convert_raw_to_physical(imu_raw_data_t *raw_data, imu_physical_data_t *physical_data) {
+    physical_data->acc_x_g = raw_data->acc_x_raw / Acc_Sensitivity;
+    physical_data->acc_y_g = raw_data->acc_y_raw / Acc_Sensitivity;
+    physical_data->acc_z_g = raw_data->acc_z_raw / Acc_Sensitivity;
+
+    physical_data->temp_C = ((raw_data->temp_raw + RoomTemp_Offset) / Temp_Sensitivity) + 21;
+
+    physical_data->gyro_x_dps = raw_data->gyro_x_raw / Gyro_Sensitivity;
+    physical_data->gyro_y_dps = raw_data->gyro_y_raw / Gyro_Sensitivity;
+    physical_data->gyro_z_dps = raw_data->gyro_z_raw / Gyro_Sensitivity;
 }
