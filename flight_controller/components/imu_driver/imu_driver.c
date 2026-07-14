@@ -31,6 +31,10 @@ static const char *TAG = "IMU";
 //acc are scala setata la +/-8g -> sensibilitatea = 32768 / 8 = 4096
 //gyro are scala setata la 2000dps -> sensibilitatea = 32768 / 2000 ~ 16.4
 
+static float gyro_offset_x = 0.0f;
+static float gyro_offset_y = 0.0f;
+static float gyro_offset_z = 0.0f;
+
 static i2c_master_dev_handle_t imu_handle;
 static i2c_master_bus_handle_t imu_bus_handle;
 
@@ -125,7 +129,29 @@ void imu_convert_raw_to_physical(imu_raw_data_t *raw_data, imu_physical_data_t *
 
     physical_data->temp_C = ((raw_data->temp_raw + RoomTemp_Offset) / Temp_Sensitivity) + 21;
 
-    physical_data->gyro_x_dps = raw_data->gyro_x_raw / Gyro_Sensitivity;
-    physical_data->gyro_y_dps = raw_data->gyro_y_raw / Gyro_Sensitivity;
-    physical_data->gyro_z_dps = raw_data->gyro_z_raw / Gyro_Sensitivity;
+    physical_data->gyro_x_dps = (raw_data->gyro_x_raw - gyro_offset_x) / Gyro_Sensitivity;
+    physical_data->gyro_y_dps = (raw_data->gyro_y_raw - gyro_offset_y) / Gyro_Sensitivity;
+    physical_data->gyro_z_dps = (raw_data->gyro_z_raw - gyro_offset_z) / Gyro_Sensitivity;
+}
+
+void imu_calibrate_gyro(void) {
+    ESP_LOGI(TAG, "Calibrating gyro... Please keep the IMU stationary.");
+    imu_raw_data_t raw_data;
+    float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
+    const int num_samples = 1000;
+
+    for (int i = 0; i < num_samples; i++) {
+        if (imu_read_raw_data(&raw_data) == ESP_OK) {
+            sum_x += raw_data.gyro_x_raw;
+            sum_y += raw_data.gyro_y_raw;
+            sum_z += raw_data.gyro_z_raw;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2)); 
+    }
+
+    gyro_offset_x = sum_x / num_samples;
+    gyro_offset_y = sum_y / num_samples;
+    gyro_offset_z = sum_z / num_samples;
+
+    ESP_LOGI(TAG, "Gyro calibration complete: offsets - X: %.2f, Y: %.2f, Z: %.2f", gyro_offset_x, gyro_offset_y, gyro_offset_z);
 }

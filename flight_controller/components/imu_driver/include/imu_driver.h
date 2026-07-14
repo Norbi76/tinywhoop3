@@ -17,4 +17,4 @@ typedef struct {
 esp_err_t imu_setup(void);
 esp_err_t imu_read_raw_data(imu_raw_data_t *data);
 void imu_convert_raw_to_physical(imu_raw_data_t *raw_data, imu_physical_data_t *physical_data);
-//functie pentru calibrare
+void imu_calibrate_gyro(void);

@@ -15,6 +15,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         vTaskDelete(NULL);
         return;
     }
+    imu_calibrate_gyro();
 
     const TickType_t xFreq = pdMS_TO_TICKS(1000); // 1ms -> 1kHz
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -32,7 +33,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         imu_convert_raw_to_physical(&imu_raw_data, &imu_physical_data);
 
 
-        ESP_LOGI(TAG, "IMU Data - Acc: (%.2f, %.2f, %.2f), Gyro: (%.2f, %.2f, %.2f), Temp: %.2f",
+        ESP_LOGI(TAG, "IMU Data - Acc: (%.4f, %.4f, %.4f), Gyro: (%.4f, %.4f, %.4f), Temp: %.4f",
         imu_physical_data.acc_x_g, imu_physical_data.acc_y_g, imu_physical_data.acc_z_g,
         imu_physical_data.gyro_x_dps, imu_physical_data.gyro_y_dps, imu_physical_data.gyro_z_dps,
         imu_physical_data.temp_C
