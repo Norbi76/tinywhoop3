@@ -180,10 +180,8 @@ void imu_calibrate_acc(void) {
         vTaskDelay(pdMS_TO_TICKS(2)); 
     }
 
-    if (roll_offset != 0.0f && pitch_offset != 0.0f) {
-        roll_offset = roll_sum / num_samples;
-        pitch_offset = pitch_sum / num_samples;
-    }
+    roll_offset = roll_sum / num_samples;
+    pitch_offset = pitch_sum / num_samples;
 
     ESP_LOGI(TAG, "Accelerometer calibration complete: roll offset: %.2f, pitch offset: %.2f", roll_offset, pitch_offset);
 }
@@ -194,6 +192,6 @@ void imu_compute_roll_pitch(float acc_x_g, float acc_y_g, float acc_z_g, float *
         return;
     }
 
-    *roll_angle = (atan2(acc_y_g, acc_z_g) * (180.0 / M_PI)); // - roll_offset;
-    *pitch_angle = (atan2(-acc_x_g, sqrt(acc_y_g * acc_y_g + acc_z_g * acc_z_g)) * (180.0 / M_PI)); // - pitch_offset;
+    *roll_angle = (atan2(acc_y_g, acc_z_g) * (180.0 / M_PI)) - roll_offset;
+    *pitch_angle = (atan2(-acc_x_g, sqrt(acc_y_g * acc_y_g + acc_z_g * acc_z_g)) * (180.0 / M_PI)) - pitch_offset;
 }
