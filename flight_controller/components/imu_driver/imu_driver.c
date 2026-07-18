@@ -36,6 +36,9 @@ static float gyro_offset_x = 0.0f;
 static float gyro_offset_y = 0.0f;
 static float gyro_offset_z = 0.0f;
 
+static float roll_offset = 0.0f;
+static float pitch_offset = 0.0f;
+
 static i2c_master_dev_handle_t imu_handle;
 static i2c_master_bus_handle_t imu_bus_handle;
 
@@ -157,7 +160,7 @@ void imu_calibrate_gyro(void) {
     ESP_LOGI(TAG, "Gyro calibration complete: offsets - X: %.2f, Y: %.2f, Z: %.2f", gyro_offset_x, gyro_offset_y, gyro_offset_z);
 }
 
-void imu_calibrate_acc(float *roll_offset_out, float *pitch_offset_out) {
+void imu_calibrate_acc(void) {
     ESP_LOGI(TAG, "Calibrating accelerometer... Please keep the IMU stationary and level.");
     imu_raw_data_t raw_data;
     imu_physical_data_t physical_data;
@@ -177,10 +180,20 @@ void imu_calibrate_acc(float *roll_offset_out, float *pitch_offset_out) {
         vTaskDelay(pdMS_TO_TICKS(2)); 
     }
 
-    if (roll_offset_out != NULL && pitch_offset_out != NULL) {
-        *roll_offset_out = roll_sum / num_samples;
-        *pitch_offset_out = pitch_sum / num_samples;
+    if (roll_offset != 0.0f && pitch_offset != 0.0f) {
+        roll_offset = roll_sum / num_samples;
+        pitch_offset = pitch_sum / num_samples;
     }
 
-    ESP_LOGI(TAG, "Accelerometer calibration complete: roll offset: %.2f, pitch offset: %.2f", *roll_offset_out, *pitch_offset_out);
+    ESP_LOGI(TAG, "Accelerometer calibration complete: roll offset: %.2f, pitch offset: %.2f", roll_offset, pitch_offset);
+}
+
+void imu_compute_roll_pitch(float acc_x_g, float acc_y_g, float acc_z_g, float *roll_angle, float *pitch_angle) {
+    if (roll_angle == NULL || pitch_angle == NULL) {
+        ESP_LOGE(TAG, "Invalid pointers for roll or pitch.");
+        return;
+    }
+
+    *roll_angle = (atan2(acc_y_g, acc_z_g) * (180.0 / M_PI)); // - roll_offset;
+    *pitch_angle = (atan2(-acc_x_g, sqrt(acc_y_g * acc_y_g + acc_z_g * acc_z_g)) * (180.0 / M_PI)); // - pitch_offset;
 }
