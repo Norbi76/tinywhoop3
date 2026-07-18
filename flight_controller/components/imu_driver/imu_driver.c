@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "math.h"
 
 static const char *TAG = "IMU";
 
@@ -79,7 +80,7 @@ esp_err_t imu_setup(void) {
     ESP_ERROR_CHECK(imu_write_reg(REG_PWR_MGMT_1, 0x01)); // selectarea automat cea mai buna sursa de clk
     ESP_ERROR_CHECK(imu_write_reg(REG_CONFIG, 0x03)); // DLPF la 41 Hz
     ESP_ERROR_CHECK(imu_write_reg(REG_GYRO_CONFIG, 0x18)); // +/- 2000dps
-    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x10)); // +- 8g
+    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x10)); // +/- 8g
 
     uint8_t who_am_i = 0;
     esp_err_t error;
@@ -138,7 +139,7 @@ void imu_calibrate_gyro(void) {
     ESP_LOGI(TAG, "Calibrating gyro... Please keep the IMU stationary.");
     imu_raw_data_t raw_data;
     float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
-    const int num_samples = 1000;
+    const int num_samples = 500;
 
     for (int i = 0; i < num_samples; i++) {
         if (imu_read_raw_data(&raw_data) == ESP_OK) {
@@ -154,4 +155,32 @@ void imu_calibrate_gyro(void) {
     gyro_offset_z = sum_z / num_samples;
 
     ESP_LOGI(TAG, "Gyro calibration complete: offsets - X: %.2f, Y: %.2f, Z: %.2f", gyro_offset_x, gyro_offset_y, gyro_offset_z);
+}
+
+void imu_calibrate_acc(float *roll_offset_out, float *pitch_offset_out) {
+    ESP_LOGI(TAG, "Calibrating accelerometer... Please keep the IMU stationary and level.");
+    imu_raw_data_t raw_data;
+    imu_physical_data_t physical_data;
+    float roll_sum = 0.0f, pitch_sum = 0.0f;
+    const int num_samples = 500;
+
+    for (int i = 0; i < num_samples; i++) {
+        imu_read_raw_data(&raw_data);
+
+        imu_convert_raw_to_physical(&raw_data, &physical_data);
+
+        roll_sum += atan2(physical_data.acc_y_g, physical_data.acc_z_g) * (180.0 / M_PI);
+        pitch_sum += atan2(-physical_data.acc_x_g, 
+                           sqrt(physical_data.acc_y_g * physical_data.acc_y_g + 
+                                physical_data.acc_z_g * physical_data.acc_z_g)) * (180.0 / M_PI);
+
+        vTaskDelay(pdMS_TO_TICKS(2)); 
+    }
+
+    if (roll_offset_out != NULL && pitch_offset_out != NULL) {
+        *roll_offset_out = roll_sum / num_samples;
+        *pitch_offset_out = pitch_sum / num_samples;
+    }
+
+    ESP_LOGI(TAG, "Accelerometer calibration complete: roll offset: %.2f, pitch offset: %.2f", *roll_offset_out, *pitch_offset_out);
 }
