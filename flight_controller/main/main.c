@@ -23,7 +23,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         return;
     }
     // float roll_offset = 0.0f, pitch_offset = 0.0f;
-    // imu_calibrate_acc();
+    imu_calibrate_acc();
     imu_calibrate_gyro();
 
     const TickType_t xFreq = pdMS_TO_TICKS(1000); // 1ms -> 1kHz
