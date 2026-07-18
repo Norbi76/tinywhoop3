@@ -11,7 +11,7 @@
 #endif
 
 static const char *TAG = "FC_MAIN";
-#define ALPHA 0.70
+// #define ALPHA 0.70
 
 void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un param de tip void*
     ESP_LOGI(TAG, "Flight controll task started on core %d", xPortGetCoreID());
@@ -22,8 +22,8 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         vTaskDelete(NULL);
         return;
     }
-    float roll_offset = 0.0f, pitch_offset = 0.0f;
-    imu_calibrate_acc(&roll_offset, &pitch_offset);
+    // float roll_offset = 0.0f, pitch_offset = 0.0f;
+    // imu_calibrate_acc();
     imu_calibrate_gyro();
 
     const TickType_t xFreq = pdMS_TO_TICKS(1000); // 1ms -> 1kHz
@@ -49,10 +49,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         // float dt = (current_time - last_time) / 1000000.0f; // convert to seconds
         // last_time = current_time;
 
-        roll_angle = atan2(imu_physical_data.acc_y_g, imu_physical_data.acc_z_g) * (180.0 / M_PI);
-        pitch_angle = atan2(-imu_physical_data.acc_x_g, 
-                            sqrt(imu_physical_data.acc_y_g * imu_physical_data.acc_y_g + 
-                                 imu_physical_data.acc_z_g * imu_physical_data.acc_z_g)) * (180.0 / M_PI);
+        imu_compute_roll_pitch(imu_physical_data.acc_x_g, imu_physical_data.acc_y_g, imu_physical_data.acc_z_g, &roll_angle, &pitch_angle);
 
         // roll_angle_comp = ALPHA * (roll_angle_comp + imu_physical_data.gyro_x_dps * dt) + (1 - ALPHA) * roll_angle;
         // pitch_angle_comp = ALPHA * (pitch_angle_comp + imu_physical_data.gyro_y_dps * dt) + (1 - ALPHA) * pitch_angle;
@@ -63,7 +60,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
         imu_physical_data.temp_C
         );
         ESP_LOGI(TAG, "Unghiuri - Roll: %.2f | Pitch: %.2f", roll_angle, pitch_angle);
-        // ESP_LOGI(TAG, "Unghiuri compensare - Roll: %.2f | Pitch: %.2f", roll_angle_comp - roll_offset, pitch_angle_comp - pitch_offset);
+        // ESP_LOGI(TAG, "Unghiuri calibrate - Roll: %.2f | Pitch: %.2f", roll_angle - roll_offset, pitch_angle - pitch_offset);
                  
         // 2. Calculează PID
         // 3. Scrie comanda PWM către motoarele coreless
