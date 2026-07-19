@@ -70,7 +70,7 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contine un 
     }
 }
 
-void telemetry_rx_task(void *args) {
+void telemetry_task(void *args) {
     //init uart...
     ESP_LOGI(TAG, "Telemtry transmission task started on core %d", xPortGetCoreID());
 
@@ -99,7 +99,7 @@ void app_main(void)
     //Core 1 -> APP_CPU(APPLICATION CPU): este lasat mai liber
 
     xTaskCreatePinnedToCore(
-        telemetry_rx_task,
+        telemetry_task,
         "Telemetry_Task",
         4096,
         NULL,
