@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "imu_driver.h"
 #include "esp_timer.h"
+#include "telemetry_uart.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -74,7 +75,14 @@ void telemetry_task(void *args) {
     //init uart...
     ESP_LOGI(TAG, "Telemtry transmission task started on core %d", xPortGetCoreID());
 
+    telemetry_packet_t tx_packet;
+    tx_packet.start_byte = PACKET_START_BYTE;
+    tx_packet.end_byte = PACKET_END_BYTE;
     for (;;) {
+        tx_packet.roll_angle = 66.66f;
+        tx_packet.pitch_angle = 33.33f;
+        
+        uart_telemetry_send_packet(&tx_packet);
 
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -97,6 +105,22 @@ void app_main(void)
     //de ce am ales core 1 pt task ul FC?
     //Core 0 -> PRO_CPU(PROTOCOL CPU): ruleaza multe task uri de "fundal" cum ar fi accese la mem, alte functii legate de os
     //Core 1 -> APP_CPU(APPLICATION CPU): este lasat mai liber
+    esp_err_t error;
+    telemetry_uart_config_t uart_config = {
+        .uart_port  = UART_NUM_1,
+        .tx_pin     = GPIO_NUM_6, 
+        .rx_pin     = GPIO_NUM_7, 
+        .baud_rate  = 460800       
+    };
+
+    error = uart_telemetry_init(&uart_config);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize UART telemetry: %s", esp_err_to_name(error));
+        return;
+    }
+    else {
+        ESP_LOGI(TAG, "UART telemetry initialized successfully.");
+    }
 
     xTaskCreatePinnedToCore(
         telemetry_task,
