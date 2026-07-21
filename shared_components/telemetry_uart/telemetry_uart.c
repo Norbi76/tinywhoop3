@@ -61,16 +61,19 @@ esp_err_t uart_telemetry_init(const telemetry_uart_config_t *config) {
 bool uart_telemetry_read_message(telemetry_message_t *out_message) {
     telemetry_frame_header_t header;
 
+    // Reads the header
     int rx_bytes = uart_read_bytes(active_uart_num, (uint8_t *)&header, sizeof(header), pdMS_TO_TICKS(2));
     if (rx_bytes != sizeof(header)) {
         return false;
     }
 
-    if (header.start_byte != TELEMETRY_START_BYTE || header.version != TELEMETRY_PROTOCOL_VERSION) {
+    // Validate the header, checks the start byte
+    if (header.start_byte != TELEMETRY_START_BYTE) {
         uart_flush_input(active_uart_num);
         return false;
     }
 
+    //Validate the payload length
     if (header.payload_len > TELEMETRY_MAX_PAYLOAD_SIZE) {
         uart_flush_input(active_uart_num);
         return false;
@@ -79,6 +82,7 @@ bool uart_telemetry_read_message(telemetry_message_t *out_message) {
     telemetry_frame_tail_t tail;
     uint8_t payload[TELEMETRY_MAX_PAYLOAD_SIZE];
 
+    // Reads the payload if there is any
     if (header.payload_len > 0) {
         rx_bytes = uart_read_bytes(active_uart_num, payload, header.payload_len, pdMS_TO_TICKS(2));
         if (rx_bytes != header.payload_len) {
@@ -86,27 +90,34 @@ bool uart_telemetry_read_message(telemetry_message_t *out_message) {
         }
     }
 
+    //Reads the tail
     rx_bytes = uart_read_bytes(active_uart_num, (uint8_t *)&tail, sizeof(tail), pdMS_TO_TICKS(2));
     if (rx_bytes != sizeof(tail)) {
         return false;
     }
 
+    // Validates the tail, checks the end byte
     if (tail.end_byte != TELEMETRY_END_BYTE) {
         uart_flush_input(active_uart_num);
         return false;
     }
 
+    // Prepare the CRC buffer to pass it on the CRC calculation function
     uint8_t crc_buffer[sizeof(header) + TELEMETRY_MAX_PAYLOAD_SIZE];
     memcpy(crc_buffer, &header, sizeof(header));
     if (header.payload_len > 0) {
         memcpy(crc_buffer + sizeof(header), payload, header.payload_len);
     }
 
+    // Calculate the CRC for the read header and payload
     uint16_t calculated_crc = telemetry_calculate_crc16(crc_buffer, sizeof(header) + header.payload_len);
+    // Check the calculated CRC against the received CRC in the tail
     if (calculated_crc != tail.crc16) {
+        uart_flush_input(active_uart_num);
         return false;
     }
 
+    //Copy the read data into the output message structure
     out_message->header = header;
     if (header.payload_len > 0) {
         memcpy(out_message->payload, payload, header.payload_len);
@@ -116,36 +127,42 @@ bool uart_telemetry_read_message(telemetry_message_t *out_message) {
 }
 
 esp_err_t uart_telemetry_send_message(telemetry_msg_type_t msg_type, const void *payload, uint8_t payload_len) {
+    // Validate the lenght of the payload that needs to be sent
     if (payload_len > TELEMETRY_MAX_PAYLOAD_SIZE) {
         return ESP_ERR_INVALID_SIZE;
     }
 
+    // Prepare the header for the telemetry message
     telemetry_frame_header_t header = {
         .start_byte = TELEMETRY_START_BYTE,
-        .version = TELEMETRY_PROTOCOL_VERSION,
         .msg_type = (uint8_t)msg_type,
         .payload_len = payload_len,
         .seq = sequence_counter++,
     };
 
+    // Prepare the tail for the telemetry message
     telemetry_frame_tail_t tail = {
         .crc16 = 0,
         .end_byte = TELEMETRY_END_BYTE,
     };
 
+    // Compute the CRC for this message to be sent, based on the header and payload
     uint8_t crc_buffer[sizeof(header) + TELEMETRY_MAX_PAYLOAD_SIZE];
     memcpy(crc_buffer, &header, sizeof(header));
     if (payload_len > 0 && payload != NULL) {
         memcpy(crc_buffer + sizeof(header), payload, payload_len);
     }
 
+    // Set the calculated CRC in the tail of the message
     tail.crc16 = telemetry_calculate_crc16(crc_buffer, sizeof(header) + payload_len);
 
+    // Write the header to the UART interface
     int written = uart_write_bytes(active_uart_num, (const char *)&header, sizeof(header));
     if (written < 0) {
         return ESP_FAIL;
     }
 
+    // If there is any payload, write it to the UART interface
     if (payload_len > 0 && payload != NULL) {
         written = uart_write_bytes(active_uart_num, (const char *)payload, payload_len);
         if (written < 0) {
@@ -153,6 +170,7 @@ esp_err_t uart_telemetry_send_message(telemetry_msg_type_t msg_type, const void 
         }
     }
 
+    // Write the tail to the UART interface
     written = uart_write_bytes(active_uart_num, (const char *)&tail, sizeof(tail));
     return (written < 0) ? ESP_FAIL : ESP_OK;
 }
