@@ -12,16 +12,10 @@ void telemetry_task(void *pvParameters) {
     ESP_LOGI("Telemetry Task", "Telemetry task started");
 
     telemetry_message_t rx_message;
-    telemetry_control_payload_t control_frame = {
-        .roll_setpoint = 0.0f,
-        .pitch_setpoint = 0.0f,
-        .yaw_setpoint = 0.0f,
-        .throttle = 0.0f,
-        .armed = 0,
-        .flight_mode = 0,
-    };
+    telemetry_control_payload_t control_frame = {0};
 
     for (;;) {
+        web_page_get_control_frame(&control_frame);
 
         esp_err_t send_error = uart_telemetry_send_message(TELEMETRY_MSG_CONTROL, &control_frame, sizeof(control_frame));
         if (send_error != ESP_OK) {

@@ -33,6 +33,7 @@ typedef struct {
 } telemetry_dashboard_state_t;
 
 static telemetry_dashboard_state_t g_dashboard_state;
+static telemetry_control_payload_t g_web_control;
 static SemaphoreHandle_t g_dashboard_mutex;
 static bool g_wifi_started;
 
@@ -45,7 +46,23 @@ static const char *WEB_PAGE_HTML =
 	"h1{margin-top:0} .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}"
 	".tile{background:#1e293b;border-radius:14px;padding:16px} .label{color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:.08em}"
 	".value{font-size:22px;margin-top:8px;font-variant-numeric:tabular-nums} .muted{color:#94a3b8}"
-	"</style></head><body><div class='card'><h1>Telemetry Dashboard</h1>"
+	".nav{display:flex;gap:8px;margin-bottom:20px}"
+	".navbtn{background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:10px 18px;font-size:14px;cursor:pointer}"
+	".navbtn.active{background:#2563eb;border-color:#2563eb}"
+	".page{display:none} .page.active{display:block}"
+	".control-layout{display:flex;gap:40px;align-items:flex-start;justify-content:center;flex-wrap:wrap;padding-top:12px}"
+	".slider-wrap,.joystick-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}"
+	".slider-track{position:relative;width:60px;height:220px;background:#1e293b;border-radius:30px;border:1px solid #334155}"
+	".slider-thumb{position:absolute;left:5px;bottom:0;width:50px;height:50px;border-radius:50%;background:#2563eb;touch-action:none;cursor:grab}"
+	".joystick-base{position:relative;width:220px;height:220px;background:#1e293b;border-radius:50%;border:1px solid #334155}"
+	".joystick-knob{position:absolute;width:60px;height:60px;left:80px;top:80px;border-radius:50%;background:#2563eb;touch-action:none;cursor:grab}"
+	"</style></head><body><div class='card'>"
+	"<div class='nav'>"
+	"<button class='navbtn active' id='nav-dashboard'>Dashboard</button>"
+	"<button class='navbtn' id='nav-control'>Control</button>"
+	"</div>"
+	"<div id='page-dashboard' class='page active'>"
+	"<h1>Telemetry Dashboard</h1>"
 	"<p class='muted'>Connected to ESP32-S3 access point. Live data updates every 500 ms.</p>"
 	"<div class='grid'>"
 	"<div class='tile'><div class='label'>Last message</div><div class='value' id='lastType'>-</div></div>"
@@ -53,14 +70,84 @@ static const char *WEB_PAGE_HTML =
 	"<div class='tile'><div class='label'>IMU</div><div class='value' id='imu'>Waiting...</div></div>"
 	"<div class='tile'><div class='label'>Battery</div><div class='value' id='battery'>Waiting...</div></div>"
 	"<div class='tile'><div class='label'>Last control RX</div><div class='value' id='control'>Waiting...</div></div>"
-	"</div></div><script>"
+	"</div></div>"
+	"<div id='page-control' class='page'>"
+	"<h1>Flight Control</h1>"
+	"<p class='muted'>Drag the stick and slider. Values are sent to the flight controller 10 times per second.</p>"
+	"<div class='control-layout'>"
+	"<div class='slider-wrap'><div class='label'>Thrust</div>"
+	"<div class='slider-track' id='sliderTrack'><div class='slider-thumb' id='sliderThumb'></div></div>"
+	"<div class='value' id='thrustVal'>0%</div></div>"
+	"<div class='joystick-wrap'><div class='label'>Roll / Pitch</div>"
+	"<div class='joystick-base' id='joyBase'><div class='joystick-knob' id='joyKnob'></div></div>"
+	"<div class='value'>roll <span id='rollVal'>0.00</span> pitch <span id='pitchVal'>0.00</span></div></div>"
+	"</div></div>"
+	"</div><script>"
+	"function showPage(name){"
+	"document.querySelectorAll('.page').forEach(function(p){p.classList.remove('active');});"
+	"document.querySelectorAll('.navbtn').forEach(function(b){b.classList.remove('active');});"
+	"document.getElementById('page-'+name).classList.add('active');"
+	"document.getElementById('nav-'+name).classList.add('active');"
+	"if(name==='dashboard'){stopControlPush();startDashboardPolling();}else{stopDashboardPolling();startControlPush();}}"
+	"document.getElementById('nav-dashboard').addEventListener('click',function(){showPage('dashboard');});"
+	"document.getElementById('nav-control').addEventListener('click',function(){showPage('control');});"
 	"async function update(){const r=await fetch('/data');const d=await r.json();"
 	"document.getElementById('lastType').textContent=d.last_type;"
 	"document.getElementById('count').textContent=d.received_count;"
 	"document.getElementById('imu').textContent=d.has_imu ? `acc ${d.imu.acc_x.toFixed(2)}, ${d.imu.acc_y.toFixed(2)}, ${d.imu.acc_z.toFixed(2)} | gyro ${d.imu.gyro_x.toFixed(2)}, ${d.imu.gyro_y.toFixed(2)}, ${d.imu.gyro_z.toFixed(2)} | temp ${d.imu.temperature.toFixed(2)} C` : 'Waiting...';"
 	"document.getElementById('battery').textContent=d.has_battery ? `voltage ${d.battery.battery_voltage.toFixed(2)} V | current ${d.battery.battery_current.toFixed(2)} A | percent ${d.battery.battery_percent}%` : 'Waiting...';"
 	"document.getElementById('control').textContent=d.has_control ? `roll ${d.control.roll_setpoint.toFixed(2)} pitch ${d.control.pitch_setpoint.toFixed(2)} yaw ${d.control.yaw_setpoint.toFixed(2)} thr ${d.control.throttle.toFixed(2)} armed ${d.control.armed} mode ${d.control.flight_mode}` : 'Waiting...';}"
-	"update();setInterval(update,500);</script></body></html>";
+	"let dataInterval=null;"
+	"function startDashboardPolling(){if(dataInterval)return;update();dataInterval=setInterval(update,500);}"
+	"function stopDashboardPolling(){if(!dataInterval)return;clearInterval(dataInterval);dataInterval=null;}"
+	"let thrust=0, rollVal=0, pitchVal=0;"
+	"const sliderTrack=document.getElementById('sliderTrack');"
+	"const sliderThumb=document.getElementById('sliderThumb');"
+	"const trackHeight=220, thumbSize=50;"
+	"function setThrustFromClientY(clientY){"
+	"const rect=sliderTrack.getBoundingClientRect();"
+	"let y=clientY-rect.top;"
+	"y=Math.max(0,Math.min(trackHeight,y));"
+	"thrust=1-(y/trackHeight);"
+	"sliderThumb.style.bottom=(thrust*(trackHeight-thumbSize))+'px';"
+	"document.getElementById('thrustVal').textContent=Math.round(thrust*100)+'%';}"
+	"let sliderDragging=false;"
+	"sliderTrack.addEventListener('pointerdown',function(e){sliderDragging=true;sliderTrack.setPointerCapture(e.pointerId);setThrustFromClientY(e.clientY);});"
+	"sliderTrack.addEventListener('pointermove',function(e){if(sliderDragging)setThrustFromClientY(e.clientY);});"
+	"window.addEventListener('pointerup',function(){sliderDragging=false;});"
+	"const joyBase=document.getElementById('joyBase');"
+	"const joyKnob=document.getElementById('joyKnob');"
+	"const joyRadius=110, knobRadius=30;"
+	"let joyDragging=false;"
+	"function setJoyFromClient(clientX,clientY){"
+	"const rect=joyBase.getBoundingClientRect();"
+	"let dx=clientX-(rect.left+joyRadius);"
+	"let dy=clientY-(rect.top+joyRadius);"
+	"const dist=Math.sqrt(dx*dx+dy*dy);"
+	"const maxDist=joyRadius-knobRadius;"
+	"if(dist>maxDist){dx=dx*maxDist/dist;dy=dy*maxDist/dist;}"
+	"joyKnob.style.left=(joyRadius-knobRadius+dx)+'px';"
+	"joyKnob.style.top=(joyRadius-knobRadius+dy)+'px';"
+	"rollVal=dx/maxDist;"
+	"pitchVal=-dy/maxDist;"
+	"document.getElementById('rollVal').textContent=rollVal.toFixed(2);"
+	"document.getElementById('pitchVal').textContent=pitchVal.toFixed(2);}"
+	"function resetJoy(){"
+	"rollVal=0;pitchVal=0;"
+	"joyKnob.style.left=(joyRadius-knobRadius)+'px';"
+	"joyKnob.style.top=(joyRadius-knobRadius)+'px';"
+	"document.getElementById('rollVal').textContent='0.00';"
+	"document.getElementById('pitchVal').textContent='0.00';}"
+	"joyBase.addEventListener('pointerdown',function(e){joyDragging=true;joyBase.setPointerCapture(e.pointerId);setJoyFromClient(e.clientX,e.clientY);});"
+	"joyBase.addEventListener('pointermove',function(e){if(joyDragging)setJoyFromClient(e.clientX,e.clientY);});"
+	"window.addEventListener('pointerup',function(){if(joyDragging){joyDragging=false;resetJoy();}});"
+	"resetJoy();"
+	"let controlInterval=null;"
+	"function sendControl(){fetch(`/control?thrust=${thrust.toFixed(3)}&roll=${rollVal.toFixed(3)}&pitch=${pitchVal.toFixed(3)}`);}"
+	"function startControlPush(){if(controlInterval)return;controlInterval=setInterval(sendControl,100);}"
+	"function stopControlPush(){if(!controlInterval)return;clearInterval(controlInterval);controlInterval=null;}"
+	"showPage('dashboard');"
+	"</script></body></html>";
 
 static const char *msg_type_to_string(telemetry_msg_type_t msg_type) {
 	switch (msg_type) {
@@ -71,6 +158,34 @@ static const char *msg_type_to_string(telemetry_msg_type_t msg_type) {
 		case TELEMETRY_MSG_ARMING: return "ARMING";
 		case TELEMETRY_MSG_MODE: return "MODE";
 		default: return "UNKNOWN";
+	}
+}
+
+static float clampf(float value, float min, float max) {
+	if (value < min) return min;
+	if (value > max) return max;
+	return value;
+}
+
+static void handle_control_request(const char *request) {
+	const char *query = strstr(request, "GET /control?");
+	if (query == NULL) {
+		return;
+	}
+	query += strlen("GET /control?");
+
+	float thrust = 0.0f, roll = 0.0f, pitch = 0.0f;
+	sscanf(query, "thrust=%f&roll=%f&pitch=%f", &thrust, &roll, &pitch);
+
+	thrust = clampf(thrust, 0.0f, 1.0f);
+	roll = clampf(roll, -1.0f, 1.0f);
+	pitch = clampf(pitch, -1.0f, 1.0f);
+
+	if (g_dashboard_mutex != NULL && xSemaphoreTake(g_dashboard_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+		g_web_control.throttle = thrust;
+		g_web_control.roll_setpoint = roll;
+		g_web_control.pitch_setpoint = pitch;
+		xSemaphoreGive(g_dashboard_mutex);
 	}
 }
 
@@ -244,7 +359,10 @@ static void web_task(void *pvParameters) {
 			continue;
 		}
 
-		if (strstr(request, "GET /data ") != NULL) {
+		if (strstr(request, "GET /control?") != NULL) {
+			handle_control_request(request);
+			send_http_response(client_fd, "application/json", "{\"ok\":true}");
+		} else if (strstr(request, "GET /data ") != NULL) {
 			char json[768];
 			dashboard_state_to_json(json, sizeof(json));
 			send_http_response(client_fd, "application/json", json);
@@ -306,4 +424,15 @@ void web_page_store_message(const telemetry_message_t *message) {
 	}
 
 	xSemaphoreGive(g_dashboard_mutex);
+}
+
+void web_page_get_control_frame(telemetry_control_payload_t *out) {
+	if (out == NULL) {
+		return;
+	}
+
+	if (g_dashboard_mutex != NULL && xSemaphoreTake(g_dashboard_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+		*out = g_web_control;
+		xSemaphoreGive(g_dashboard_mutex);
+	}
 }
