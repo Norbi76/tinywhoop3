@@ -109,13 +109,6 @@ void telemetry_task(void *args) {
         if (send_error != ESP_OK) {
             ESP_LOGE(TAG, "IMU telemetry send failed: %s", esp_err_to_name(send_error));
         }
-        else {
-            ESP_LOGI(TAG, "IMU telemetry sent: Acc(%.2f, %.2f, %.2f) Gyro(%.2f, %.2f, %.2f) Roll: %.2f Pitch: %.2f Temp: %.2f",
-                     imu_payload.acc_x, imu_payload.acc_y, imu_payload.acc_z,
-                     imu_payload.gyro_x, imu_payload.gyro_y, imu_payload.gyro_z,
-                     imu_payload.roll, imu_payload.pitch,
-                     imu_payload.temperature);
-        }
 
         if (uart_telemetry_read_message(&rx_message)) {
             if ((telemetry_msg_type_t)rx_message.header.msg_type == TELEMETRY_MSG_CONTROL) {
