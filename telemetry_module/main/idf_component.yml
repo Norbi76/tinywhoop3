@@ -1,0 +1,6 @@
+## ESP-IDF component manager manifest for the telemetry module.
+## esp32-camera is pulled from the Espressif component registry rather than vendored.
+dependencies:
+  espressif/esp32-camera: "^2.0.4"
+  idf:
+    version: ">=5.0"

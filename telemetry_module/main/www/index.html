@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- user-scalable=no and maximum-scale=1 stop a double-tap on a control button from zooming
+     the page mid-flight, which would otherwise move every other button out from under the
+     pilot's thumb. -->
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>TinyWhoop Control</title>
+<style>
+/* Everything is inline - no CDN, no external fonts, no external anything. The drone's AP has
+   no internet connection, so any external reference would simply hang. */
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;padding:8px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+     background:#0b1220;color:#e6edf7;font-size:14px;overscroll-behavior:none}
+h1{font-size:16px;margin:0 0 8px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* --- Status bar --- */
+#status{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:6px;margin-bottom:10px}
+.stat{background:#151f33;border:1px solid #25314a;border-radius:8px;padding:6px 8px}
+.stat .k{font-size:10px;color:#8fa3c0;text-transform:uppercase;letter-spacing:.06em}
+.stat .v{font-size:15px;margin-top:2px;font-variant-numeric:tabular-nums}
+
+/* --- Banner --- */
+#banner{padding:8px;border-radius:8px;margin-bottom:10px;font-weight:600;text-align:center}
+.ok{background:#12341f;border:1px solid #2c7a4b;color:#7ee2a8}
+.warn{background:#3a2a10;border:1px solid #8a6420;color:#f0c674}
+.bad{background:#3a1418;border:1px solid #8a2b33;color:#ff9aa2}
+
+/* --- Control buttons ---
+   touch-action:none is essential: without it the browser treats a press-and-drag on a button
+   as a scroll gesture, swallows the pointer events, and the button never reports release. */
+.btn{touch-action:none;user-select:none;background:#1b2740;border:1px solid #2e3d5c;color:#e6edf7;
+     border-radius:10px;padding:16px 0;font-size:15px;font-weight:600;text-align:center;cursor:pointer}
+.btn.held{background:#2563eb;border-color:#3b82f6}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
+.pad .sp{visibility:hidden}
+.group{background:#101a2e;border:1px solid #1e2b45;border-radius:12px;padding:10px;margin-bottom:10px}
+.group h2{font-size:12px;color:#8fa3c0;text-transform:uppercase;letter-spacing:.08em;margin:0 0 8px}
+.half{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.third{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+
+/* --- Action buttons (tap, not hold) --- */
+.act{background:#1b2740;border:1px solid #2e3d5c;color:#e6edf7;border-radius:10px;padding:14px 0;
+     font-size:14px;font-weight:700;cursor:pointer;width:100%}
+.act.arm{background:#14532d;border-color:#22c55e}
+.act.disarm{background:#374151;border-color:#6b7280}
+.act.kill{background:#7f1d1d;border-color:#ef4444}
+.act.on{background:#2563eb;border-color:#3b82f6}
+.act.shot{background:#4c1d95;border-color:#8b5cf6}
+
+/* --- Collapsible tuning --- */
+details{background:#101a2e;border:1px solid #1e2b45;border-radius:12px;padding:8px}
+summary{cursor:pointer;font-size:12px;color:#8fa3c0;text-transform:uppercase;letter-spacing:.08em;padding:4px}
+.gain{display:grid;grid-template-columns:1fr repeat(3,minmax(0,1fr)) auto;gap:4px;align-items:center;margin-top:6px}
+.gain label{font-size:11px;color:#a9bcd8}
+.gain input{width:100%;background:#0b1220;border:1px solid #2e3d5c;color:#e6edf7;border-radius:6px;
+            padding:6px;font-size:12px;font-variant-numeric:tabular-nums}
+.gain button{background:#1e3a8a;border:1px solid #3b82f6;color:#fff;border-radius:6px;padding:6px 10px;font-size:11px;cursor:pointer}
+</style>
+</head>
+<body>
+
+<h1>TinyWhoop Control</h1>
+<div id="banner" class="bad">Connecting...</div>
+
+<div id="status">
+  <div class="stat"><div class="k">Armed</div><div class="v" id="s_armed">-</div></div>
+  <div class="stat"><div class="k">Mode</div><div class="v" id="s_mode">-</div></div>
+  <div class="stat"><div class="k">Roll</div><div class="v" id="s_roll">-</div></div>
+  <div class="stat"><div class="k">Pitch</div><div class="v" id="s_pitch">-</div></div>
+  <div class="stat"><div class="k">Yaw</div><div class="v" id="s_yaw">-</div></div>
+  <div class="stat"><div class="k">Alt</div><div class="v" id="s_alt">-</div></div>
+  <div class="stat"><div class="k">Batt</div><div class="v" id="s_batt">-</div></div>
+  <div class="stat"><div class="k">Loop Hz</div><div class="v" id="s_hz">-</div></div>
+  <div class="stat"><div class="k">Photos</div><div class="v" id="s_shots">-</div></div>
+</div>
+
+<!-- Pitch / roll pad -->
+<div class="group">
+  <h2>Pitch / Roll</h2>
+  <div class="pad">
+    <div class="sp"></div>
+    <div class="btn" data-btn="pitch_forward">FWD</div>
+    <div class="sp"></div>
+    <div class="btn" data-btn="roll_left">LEFT</div>
+    <div class="sp"></div>
+    <div class="btn" data-btn="roll_right">RIGHT</div>
+    <div class="sp"></div>
+    <div class="btn" data-btn="pitch_back">BACK</div>
+    <div class="sp"></div>
+  </div>
+</div>
+
+<!-- Altitude and yaw -->
+<div class="group">
+  <h2>Altitude (trim) / Yaw</h2>
+  <div class="half" style="margin-bottom:6px">
+    <div class="btn" data-btn="throttle_up">ALT +</div>
+    <div class="btn" data-btn="throttle_down">ALT &minus;</div>
+  </div>
+  <div class="half">
+    <div class="btn" data-btn="yaw_left">YAW &#8592;</div>
+    <div class="btn" data-btn="yaw_right">YAW &#8594;</div>
+  </div>
+</div>
+
+<!-- Arming and actions -->
+<div class="group">
+  <h2>Arming</h2>
+  <div class="third" style="margin-bottom:6px">
+    <button class="act arm" id="b_arm">ARM</button>
+    <button class="act disarm" id="b_disarm">DISARM</button>
+    <button class="act kill" id="b_kill">KILL</button>
+  </div>
+  <div class="half">
+    <button class="act" id="b_hold">HOLD: OFF</button>
+    <button class="act shot" id="b_shot">SHOT</button>
+  </div>
+  <div class="half">
+    <button class="act" id="b_preview">PREVIEW: OFF</button>
+  </div>
+</div>
+
+<!-- Viewfinder. Hidden until preview is switched on; the radio is the most expensive thing
+     on this board and streaming is the only thing that makes it transmit continuously. -->
+<div id="previewPanel" style="display:none">
+  <img id="previewImg" alt="viewfinder"
+       style="width:100%;border-radius:8px;background:#111;display:block">
+  <div class="muted" id="previewInfo" style="text-align:center">starting...</div>
+</div>
+
+<!-- Collapsible PID tuning -->
+<details>
+  <summary>PID tuning</summary>
+  <div id="gains"></div>
+</details>
+
+<script>
+// ---------------------------------------------------------------------------
+// Button state. Every held button is tracked here and the whole object is posted at a fixed
+// 20 Hz, rather than sending an event per press. Fixed-rate posting is what lets the drone
+// detect that the browser has gone away: no posts means no pilot.
+// ---------------------------------------------------------------------------
+var held = {
+  pitch_forward:false, pitch_back:false,
+  roll_left:false, roll_right:false,
+  yaw_left:false, yaw_right:false,
+  throttle_up:false, throttle_down:false
+};
+
+var armed = false, hold = false;
+
+// --- Press and hold wiring -------------------------------------------------
+function bindHold(el) {
+  var name = el.getAttribute('data-btn');
+
+  function press(e) {
+    e.preventDefault();
+    held[name] = true;
+    el.classList.add('held');
+    // Capture the pointer so we keep getting events even if the finger slides off the button.
+    if (el.setPointerCapture && e.pointerId !== undefined) {
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+  }
+
+  function release(e) {
+    if (e) e.preventDefault();
+    held[name] = false;
+    el.classList.remove('held');
+  }
+
+  el.addEventListener('pointerdown', press);
+  el.addEventListener('pointerup', release);
+  // pointercancel fires when the OS steals the gesture (a notification, a call). Without
+  // handling it the button would latch on and the drone would keep flying in that direction.
+  el.addEventListener('pointercancel', release);
+  el.addEventListener('pointerleave', release);
+  el.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+}
+
+var padButtons = document.querySelectorAll('[data-btn]');
+for (var i = 0; i < padButtons.length; i++) bindHold(padButtons[i]);
+
+// --- Release everything --------------------------------------------------
+// Called whenever the page loses focus. If the pilot switches apps or the phone locks, every
+// button must come up: the alternative is a drone that keeps flying in whatever direction was
+// last pressed. The firmware has its own 500 ms timeout as a backstop, but releasing here is
+// immediate and does not depend on the network still working.
+function releaseAll() {
+  for (var k in held) held[k] = false;
+  var els = document.querySelectorAll('.btn.held');
+  for (var i = 0; i < els.length; i++) els[i].classList.remove('held');
+}
+
+// --- Viewfinder ------------------------------------------------------------
+// OFF by default and stopped whenever the tab is not visible. Frames are requested one at a
+// time: the next request goes out only after the previous image resolves, so if the link
+// slows down the preview degrades on its own instead of queueing up behind the control POSTs.
+var previewOn = false;
+var previewBusy = false;
+var previewFrames = 0;
+var previewImg = document.getElementById('previewImg');
+var previewPanel = document.getElementById('previewPanel');
+var previewInfo = document.getElementById('previewInfo');
+
+function previewTick() {
+  if (!previewOn || previewBusy || document.hidden) return;
+  previewBusy = true;
+  var probe = new Image();
+  probe.onload = function() {
+    previewImg.src = probe.src;
+    previewBusy = false;
+    previewFrames++;
+    previewInfo.textContent = previewFrames + ' frames';
+  };
+  probe.onerror = function() {
+    previewBusy = false;      // usually just "no frame yet" right after switching on
+  };
+  probe.src = '/preview.jpg?n=' + Date.now();
+}
+setInterval(previewTick, 120);   // ~8 fps ceiling; actual rate follows the link
+
+function setPreview(on) {
+  previewOn = on;
+  previewPanel.style.display = on ? 'block' : 'none';
+  var button = document.getElementById('b_preview');
+  button.textContent = 'PREVIEW: ' + (on ? 'ON' : 'OFF');
+  button.className = on ? 'act on' : 'act';
+  if (!on) { previewFrames = 0; previewInfo.textContent = 'starting...'; }
+  post('/api/preview', { enable: on });
+}
+
+document.getElementById('b_preview').addEventListener('click', function() {
+  setPreview(!previewOn);
+});
+
+// Stop previewing whenever the tab goes away. Same reasoning as releasing the sticks: if you
+// are not looking at it, it must not keep the radio transmitting.
+function stopPreviewIfHidden() {
+  if (previewOn) setPreview(false);
+}
+window.addEventListener('blur', stopPreviewIfHidden);
+window.addEventListener('pagehide', stopPreviewIfHidden);
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) stopPreviewIfHidden();
+});
+
+window.addEventListener('blur', releaseAll);
+window.addEventListener('pagehide', releaseAll);
+document.addEventListener('visibilitychange', function() {
+  if (document.hidden) releaseAll();
+});
+
+// --- Fixed 20 Hz input POST ------------------------------------------------
+var inputFailures = 0;
+
+function sendInput() {
+  fetch('/api/input', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(held)
+  }).then(function(){ inputFailures = 0; })
+    .catch(function(){ inputFailures++; });
+}
+setInterval(sendInput, 50);   // 20 Hz
+
+// --- Action buttons --------------------------------------------------------
+function post(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {})
+  });
+}
+
+document.getElementById('b_arm').addEventListener('click', function() {
+  armed = true;
+  post('/api/arm', {armed: true});
+});
+
+document.getElementById('b_disarm').addEventListener('click', function() {
+  armed = false;
+  releaseAll();
+  post('/api/arm', {armed: false});
+});
+
+document.getElementById('b_kill').addEventListener('click', function() {
+  armed = false;
+  releaseAll();
+  post('/api/arm', {kill: true});
+});
+
+document.getElementById('b_hold').addEventListener('click', function() {
+  hold = !hold;
+  var b = document.getElementById('b_hold');
+  b.textContent = 'HOLD: ' + (hold ? 'ON' : 'OFF');
+  b.className = 'act' + (hold ? ' on' : '');
+  post('/api/mode', {hold: hold, mode: hold ? 2 : 0});
+});
+
+document.getElementById('b_shot').addEventListener('click', function() {
+  // Returns immediately - the firmware queues the shot and writes it on another core.
+  post('/api/capture', {});
+});
+
+// --- PID tuning ------------------------------------------------------------
+// Loop ids must match telemetry_loop_id_t in telemetry_uart.h.
+var LOOPS = [
+  [0, 'Rate roll'], [1, 'Rate pitch'], [2, 'Rate yaw'],
+  [3, 'Angle roll'], [4, 'Angle pitch'],
+  [5, 'Vel X'], [6, 'Vel Y'], [7, 'Altitude']
+];
+
+var gainsHost = document.getElementById('gains');
+for (var g = 0; g < LOOPS.length; g++) {
+  (function(id, name) {
+    var row = document.createElement('div');
+    row.className = 'gain';
+    row.innerHTML =
+      '<label>' + name + '</label>' +
+      '<input type="number" step="any" placeholder="kp" id="kp' + id + '">' +
+      '<input type="number" step="any" placeholder="ki" id="ki' + id + '">' +
+      '<input type="number" step="any" placeholder="kd" id="kd' + id + '">' +
+      '<button id="gs' + id + '">SET</button>';
+    gainsHost.appendChild(row);
+
+    document.getElementById('gs' + id).addEventListener('click', function() {
+      var kp = parseFloat(document.getElementById('kp' + id).value);
+      var ki = parseFloat(document.getElementById('ki' + id).value);
+      var kd = parseFloat(document.getElementById('kd' + id).value);
+      if (isNaN(kp) || isNaN(ki) || isNaN(kd)) {
+        alert('Enter all three gains for ' + name);
+        return;
+      }
+      post('/api/gains', {loop: id, kp: kp, ki: ki, kd: kd});
+    });
+  })(LOOPS[g][0], LOOPS[g][1]);
+}
+
+// --- Telemetry readback ----------------------------------------------------
+var MODES = ['ANGLE', 'ALT HOLD', 'POS HOLD'];
+
+function setText(id, text) { document.getElementById(id).textContent = text; }
+
+function refresh() {
+  fetch('/api/status').then(function(r){ return r.json(); }).then(function(d) {
+    var banner = document.getElementById('banner');
+
+    if (!d.link) {
+      banner.className = 'bad';
+      banner.textContent = 'NO LINK TO FLIGHT CONTROLLER';
+    } else if (d.killed) {
+      banner.className = 'bad';
+      banner.textContent = 'KILLED - disarm to reset';
+    } else if (d.armed) {
+      banner.className = 'warn';
+      banner.textContent = 'ARMED - MOTORS LIVE';
+    } else if (!d.attitude_init) {
+      banner.className = 'warn';
+      banner.textContent = 'Attitude initialising, hold still';
+    } else {
+      banner.className = 'ok';
+      banner.textContent = 'Ready to arm';
+    }
+
+    setText('s_armed', d.armed ? 'YES' : 'no');
+    setText('s_mode', MODES[d.mode] || d.mode);
+    setText('s_roll', d.roll.toFixed(1) + '°');
+    setText('s_pitch', d.pitch.toFixed(1) + '°');
+    setText('s_yaw', d.yaw.toFixed(1) + '°');
+    setText('s_alt', d.alt_valid ? d.altitude.toFixed(2) + ' m' : 'n/a');
+    setText('s_batt', d.battery.toFixed(2) + ' V');
+    setText('s_hz', d.loop_hz);
+    setText('s_shots', d.shots_written + '/' + d.shots_requested +
+                       (d.shots_failed ? ' (' + d.shots_failed + ' fail)' : ''));
+  }).catch(function() {
+    var banner = document.getElementById('banner');
+    banner.className = 'bad';
+    banner.textContent = 'DASHBOARD DISCONNECTED';
+  });
+}
+setInterval(refresh, 200);   // 5 Hz
+refresh();
+</script>
+</body>
+</html>

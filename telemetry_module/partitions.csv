@@ -1,0 +1,8 @@
+# Telemetry module partition table - 8 MB flash on the XIAO ESP32-S3 Sense.
+# The app is large: Wi-Fi stack + HTTP server + esp32-camera + FATFS all in one image, plus
+# the embedded dashboard. 4 MB leaves generous headroom over the ~3 MB minimum.
+# Photos go to the SD card, not to flash, so no storage partition is needed here.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  4M,

@@ -4,6 +4,7 @@
 #include <string.h>
 #include <stddef.h>
 #include "esp_err.h"
+#include "esp_timer.h"
 
 #define UART_BUF_SIZE (1024 * 2)
 
@@ -124,6 +125,80 @@ bool uart_telemetry_read_message(telemetry_message_t *out_message) {
     }
     out_message->tail = tail;
     return true;
+}
+
+bool uart_telemetry_read_message_resync(telemetry_message_t *out_message, uint32_t timeout_ms) {
+    if (out_message == NULL) {
+        return false;
+    }
+
+    const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+
+    while (esp_timer_get_time() < deadline_us) {
+        uint8_t byte = 0;
+
+        // Scan forward one byte at a time until a start byte turns up.
+        // Everything skipped here is either line noise or the tail of a frame we already gave up on.
+        if (uart_read_bytes(active_uart_num, &byte, 1, 1) != 1) {
+            continue;
+        }
+        if (byte != TELEMETRY_START_BYTE) {
+            continue;
+        }
+
+        // Start byte found. Read the rest of the header.
+        telemetry_frame_header_t header;
+        header.start_byte = byte;
+        uint8_t *header_rest = (uint8_t *)&header + 1;
+        const size_t header_rest_len = sizeof(header) - 1;
+
+        if (uart_read_bytes(active_uart_num, header_rest, header_rest_len, pdMS_TO_TICKS(2)) != (int)header_rest_len) {
+            continue;
+        }
+
+        // A length past the maximum means this 0xAA was payload data, not a real frame start.
+        // Drop it and keep scanning - do NOT flush, the next start byte may already be in the buffer.
+        if (header.payload_len > TELEMETRY_MAX_PAYLOAD_SIZE) {
+            continue;
+        }
+
+        uint8_t payload[TELEMETRY_MAX_PAYLOAD_SIZE];
+        if (header.payload_len > 0) {
+            if (uart_read_bytes(active_uart_num, payload, header.payload_len, pdMS_TO_TICKS(2)) != (int)header.payload_len) {
+                continue;
+            }
+        }
+
+        telemetry_frame_tail_t tail;
+        if (uart_read_bytes(active_uart_num, (uint8_t *)&tail, sizeof(tail), pdMS_TO_TICKS(2)) != (int)sizeof(tail)) {
+            continue;
+        }
+
+        if (tail.end_byte != TELEMETRY_END_BYTE) {
+            continue;
+        }
+
+        uint8_t crc_buffer[sizeof(header) + TELEMETRY_MAX_PAYLOAD_SIZE];
+        memcpy(crc_buffer, &header, sizeof(header));
+        if (header.payload_len > 0) {
+            memcpy(crc_buffer + sizeof(header), payload, header.payload_len);
+        }
+
+        if (telemetry_calculate_crc16(crc_buffer, sizeof(header) + header.payload_len) != tail.crc16) {
+            // Corrupted frame. We have consumed its bytes, so simply resume scanning from here.
+            // Worst case we lose the one frame that follows it; the caller sees a gap, not a stall.
+            continue;
+        }
+
+        out_message->header = header;
+        if (header.payload_len > 0) {
+            memcpy(out_message->payload, payload, header.payload_len);
+        }
+        out_message->tail = tail;
+        return true;
+    }
+
+    return false;
 }
 
 esp_err_t uart_telemetry_send_message(telemetry_msg_type_t msg_type, const void *payload, uint8_t payload_len) {
