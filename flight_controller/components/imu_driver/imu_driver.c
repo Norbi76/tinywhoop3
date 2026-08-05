@@ -13,7 +13,7 @@ static const char *TAG = "IMU";
 #define I2C_MASTER_FREQ_HZ 400000
 #define IMU_ADDR 0x68
 
-#define MPU_6500_WHO_AM_I 0x70
+#define MPU_9250_WHO_AM_I 0x74
 
 //harta registrilor...
 #define REG_CONFIG       0x1A // Filtrul Low-Pass (DLPF)
@@ -92,12 +92,12 @@ esp_err_t imu_setup(void) {
         return ESP_FAIL;
     }
 
-    if (who_am_i != MPU_6500_WHO_AM_I) {
-        ESP_LOGE(TAG, "Expected WHO_AM_I value: 0x%x, but got: 0x%x", MPU_6500_WHO_AM_I, who_am_i);
+    if (who_am_i != MPU_9250_WHO_AM_I) {
+        ESP_LOGE(TAG, "Expected WHO_AM_I value: 0x%x, but got: 0x%x", MPU_9250_WHO_AM_I, who_am_i);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "IMU MPU 6500 found at address 0x%x", IMU_ADDR);
+    ESP_LOGI(TAG, "IMU MPU 9250 found at address 0x%x", IMU_ADDR);
     
 
     return ESP_OK;

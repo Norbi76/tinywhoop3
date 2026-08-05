@@ -1,0 +1,7 @@
+# Flight controller partition table - 4 MB flash.
+# Offsets must start at 0x10000 for the app because the partition table itself lives at 0x8000.
+# 0x10000 + 0x300000 = 0x310000, comfortably inside 4 MB (0x400000).
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xf000,   0x1000,
+factory,    app,  factory, 0x10000,  3M,

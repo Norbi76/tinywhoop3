@@ -1,3 +1,5 @@
 .vscode
 *.zip
 video_streaming
+build
+managed_components

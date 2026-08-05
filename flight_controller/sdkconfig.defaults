@@ -1,0 +1,37 @@
+# Flight controller build defaults.
+# This file is the authoritative configuration; sdkconfig is generated from it and can be
+# deleted at any time to get back to a known-good state.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---------------------------------------------------------------------------
+# Scheduler tick.
+# The rate inner loop runs at 1 kHz off vTaskDelayUntil(), which cannot resolve
+# finer than one scheduler tick. At the ESP-IDF default of 100 Hz a tick is 10 ms,
+# so a "1 kHz" loop actually runs at 100 Hz at best. 1000 Hz makes one tick == 1 ms.
+# ---------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+
+# Full clock speed - the cascade has to finish inside one 1 ms tick.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+
+# Optimise for speed rather than size; there is plenty of flash and the loop is tight.
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# ---------------------------------------------------------------------------
+# Partitions: 4 MB flash, single 3 MB app partition.
+# ---------------------------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# ---------------------------------------------------------------------------
+# Task watchdog: keep it on, but let the 1 kHz loop breathe during IMU calibration
+# (imu_calibrate_gyro/acc block for ~1 s each at boot).
+# ---------------------------------------------------------------------------
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Float support in log/printf - the telemetry and tuning logs are all floats.
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
