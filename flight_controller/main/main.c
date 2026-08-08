@@ -288,9 +288,12 @@ void app_main(void)
 
     // --- Navigation sensors --------------------------------------------------
     // Wait for fc_task to finish imu_setup() and the calibration sweeps, because the VL53L1X
-    // attaches to the I2C bus that imu_setup() creates. Calibration is 500 samples at 2 ms on
-    // each of two axes, so ~2 s; 10 s of headroom is plenty.
-    if (xSemaphoreTake(imu_ready_semaphore, pdMS_TO_TICKS(10000)) != pdTRUE) {
+    // attaches to the I2C bus that imu_setup() creates. Accel calibration is 500 samples at
+    // 2 ms (~1.5 s with the I2C reads), and the gyro sweep is 1000 samples and may retry up to
+    // three times if it detects motion. The 2 ms delay rounds up at a 1 kHz tick and the I2C
+    // read adds ~0.5 ms, so each sweep is nearer 3 s than 2 s: ~11 s worst case in total.
+    // 30 s leaves room for that without the ToF ever starting mid-calibration.
+    if (xSemaphoreTake(imu_ready_semaphore, pdMS_TO_TICKS(30000)) != pdTRUE) {
         ESP_LOGE(TAG, "IMU never became ready - navigation sensors will not be started");
     } else {
         error = sensor_task_init();

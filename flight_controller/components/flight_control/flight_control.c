@@ -39,6 +39,29 @@ static const char *TAG = "FLIGHT_CTRL";
 #define MOTOR_IDLE_THRESHOLD 0.05f
 
 // ---------------------------------------------------------------------------
+// TODO(bench): MOTOR_IDLE_THRUST - MEASURE THIS.
+// The floor the mixer keeps every motor at while armed and above MOTOR_IDLE_THRESHOLD.
+// A coreless motor that is commanded to zero has STOPPED, and a stopped motor produces no
+// control authority at all until it spins back up - which is what makes an attitude
+// correction at low throttle silently kill two of the four motors.
+//
+// It must sit ABOVE the duty at which the motor reliably starts and keeps turning. See the
+// thrust-curve note in motor_driver.c: these motors produce nothing usable below roughly
+// 10-15% duty. Thrust maps straight to duty, so 0.12 here is 12% duty at the pin.
+//
+// How to measure: props OFF, arm, and use motor_set_thrust() to walk each motor up from 0
+// until all four start reliably from standstill. Take the worst motor, add margin.
+// ---------------------------------------------------------------------------
+#define MOTOR_IDLE_THRUST 0.12f
+
+// Cap on how much the mixer is allowed to raise the throttle to make room for an attitude
+// correction. Without a cap this becomes full "airmode": at low stick the mixer would keep
+// pushing the average thrust up to preserve authority, and on a button-driven throttle that
+// means ALT- stops producing a descent. 15% is enough to keep the props alive through a
+// correction without fighting the pilot.
+#define MAX_MIXER_THROTTLE_BOOST 0.15f
+
+// ---------------------------------------------------------------------------
 // TODO(bench): HOVER_THROTTLE - MEASURE THIS.
 // The normalised throttle at which the drone holds altitude with no vertical acceleration.
 // The altitude loop's output is added on top of this, so a bad value means the altitude loop
@@ -256,34 +279,87 @@ void flight_control_set_control_input(const telemetry_control_payload_t *control
 // one that changes.
 // ---------------------------------------------------------------------------
 static void flight_control_mix(float throttle, float roll, float pitch, float yaw, float out[MOTOR_COUNT]) {
-    out[MOTOR_FRONT_LEFT]  = throttle + roll - pitch - yaw;
-    out[MOTOR_FRONT_RIGHT] = throttle - roll - pitch + yaw;
-    out[MOTOR_REAR_LEFT]   = throttle + roll + pitch + yaw;
-    out[MOTOR_REAR_RIGHT]  = throttle - roll + pitch - yaw;
+    // The attitude mix on its own, with no throttle in it yet. What matters for control is the
+    // DIFFERENCE between motors, so the throttle is placed afterwards, once we know how much
+    // spread the attitude command actually needs.
+    float mix[MOTOR_COUNT];
+    mix[MOTOR_FRONT_LEFT]  =  roll - pitch - yaw;
+    mix[MOTOR_FRONT_RIGHT] = -roll - pitch + yaw;
+    mix[MOTOR_REAR_LEFT]   =  roll + pitch + yaw;
+    mix[MOTOR_REAR_RIGHT]  = -roll + pitch - yaw;
 
-    // --- Proportional saturation --------------------------------------------
-    // If any motor is asking for more than full thrust, scale ALL FOUR down by the same
-    // factor. Simply clipping the one that overflowed would silently change the ratios
-    // between motors, which is exactly the same as corrupting the attitude command - the
-    // drone would roll or pitch when it was told to do neither. Scaling proportionally
-    // costs some total thrust but preserves the attitude the controller asked for.
-    float maximum = out[0];
+    float mix_min = mix[0];
+    float mix_max = mix[0];
     for (int i = 1; i < MOTOR_COUNT; i++) {
-        if (out[i] > maximum) {
-            maximum = out[i];
-        }
+        if (mix[i] < mix_min) mix_min = mix[i];
+        if (mix[i] > mix_max) mix_max = mix[i];
     }
 
-    if (maximum > 1.0f) {
-        const float scale = 1.0f / maximum;
+    // --- Step 1: make the attitude command fit in the available band ---------
+    // The usable band is [MOTOR_IDLE_THRUST, 1.0]. If the spread the attitude loops asked for
+    // is wider than that, scale the mix - and ONLY the mix - down until it fits. Scaling the
+    // differences is what preserves the commanded attitude; scaling the motor outputs
+    // themselves (throttle included) would not, because it shrinks the differences by a
+    // different proportion than it shrinks the average.
+    const float available_band = 1.0f - MOTOR_IDLE_THRUST;
+    const float mix_range = mix_max - mix_min;
+
+    if (mix_range > available_band) {
+        const float scale = available_band / mix_range;
         for (int i = 0; i < MOTOR_COUNT; i++) {
-            out[i] *= scale;
+            mix[i] *= scale;
         }
+        mix_min *= scale;
+        mix_max *= scale;
     }
 
-    // Negative demands cannot be delivered by a unidirectional brushed motor.
+    // --- Step 2: place the throttle so nothing falls off either end ----------
+    // A brushed motor commanded to zero stops turning, and a stopped motor produces no torque
+    // no matter what the rate loop asks for next. Rather than clipping the low motors to zero
+    // (which corrupts the attitude command precisely when the drone most needs it), shift the
+    // whole group up so the lowest motor lands on the idle floor.
+    const float lowest_allowed = MOTOR_IDLE_THRUST - mix_min;   // throttle that puts min motor at idle
+    const float highest_allowed = 1.0f - mix_max;               // throttle that puts max motor at full
+
+    float placed_throttle = throttle;
+
+    if (placed_throttle < lowest_allowed) {
+        // Bounded boost: see MAX_MIXER_THROTTLE_BOOST. If the cap bites, the low motors do end
+        // up below idle and get clamped below - a deliberate trade so that holding ALT- always
+        // produces a real descent.
+        const float boost = clampf(lowest_allowed - placed_throttle, 0.0f, MAX_MIXER_THROTTLE_BOOST);
+        placed_throttle += boost;
+    }
+
+    if (placed_throttle > highest_allowed) {
+        placed_throttle = highest_allowed;
+    }
+
+    // --- Step 3: if the capped boost left us short, shrink the mix to fit ----
+    // When MAX_MIXER_THROTTLE_BOOST bites there is not enough room below the throttle to fit
+    // the attitude command, and the naive answer - let the low motors clip to zero - is the
+    // original bug: a stopped motor delivers no torque at all, and has spin-up lag before it
+    // can. Scaling the mix to the band we actually have degrades the attitude authority
+    // smoothly instead, and keeps all four motors turning. `fit` is applied to all three axes
+    // equally, so the DIRECTION of the commanded attitude is preserved, only its size shrinks.
+    const float down_room = placed_throttle - MOTOR_IDLE_THRUST;
+    const float up_room = 1.0f - placed_throttle;
+
+    float fit = 1.0f;
+    if (mix_min < 0.0f && -mix_min > down_room) {
+        fit = fminf(fit, down_room / -mix_min);
+    }
+    if (mix_max > 0.0f && mix_max > up_room) {
+        fit = fminf(fit, up_room / mix_max);
+    }
+    if (fit < 0.0f) {
+        fit = 0.0f;   // throttle is below the idle floor entirely: no room either way
+    }
+
+    // With the three steps above nothing should land outside [0, 1]; this clamp is a safety
+    // net against a NaN or a future edit, not load-bearing behaviour.
     for (int i = 0; i < MOTOR_COUNT; i++) {
-        out[i] = clampf(out[i], 0.0f, 1.0f);
+        out[i] = clampf(placed_throttle + mix[i] * fit, 0.0f, 1.0f);
     }
 }
 
@@ -521,13 +597,18 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     if (control.throttle < MOTOR_IDLE_THRESHOLD && !altitude_hold_engaged) {
         flight_control_stop_motors();
         flight_control_reset_all_pids();
+        tick_counter = 0;   // same clean-phase restart as the disarm path: the reset above
+                            // zeroed throttle_command, so the outer loop must run on the very
+                            // first tick out of idle rather than 20 ticks later
         return;
     }
 
     // --- Cascade -------------------------------------------------------------
     // Divider counters, so all three loops stay locked to the same 1 kHz timebase.
-    tick_counter++;
-
+    // The counter is tested BEFORE it is incremented so that the very first tick after arming
+    // (counter == 0) runs all three loops. Otherwise throttle_command would still be the 0 left
+    // by the reset for the first 20 ticks, and the mixer's idle floor would spin the motors on
+    // a throttle the pilot never commanded.
     if ((tick_counter % OUTER_LOOP_DIVIDER) == 0) {
         flight_control_outer_loop(&control, nav);
     }
@@ -537,6 +618,8 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     }
 
     flight_control_inner_loop(attitude, dt);
+
+    tick_counter++;
 }
 
 void flight_control_get_status(telemetry_status_payload_t *out) {
@@ -561,9 +644,9 @@ void flight_control_get_status(telemetry_status_payload_t *out) {
     out->velocity_x = nav.velocity_x;
     out->velocity_y = nav.velocity_y;
 
-    // TODO(hardware): battery voltage. There is no ADC divider wired up yet, so this reports
-    // the nominal value. Once you have a divider on the pack, read it here and also feed it
-    // to motor_update_battery_voltage() so thrust compensation actually does something.
+    // There is no ADC divider on the pack and none is planned, so this is a fixed nominal value
+    // purely to keep the dashboard's battery field populated - it is NOT a measurement and it
+    // will not fall as the pack drains. Nothing in the control path reads it.
     out->battery_voltage = 3.8f;
 
     for (int i = 0; i < MOTOR_COUNT; i++) {

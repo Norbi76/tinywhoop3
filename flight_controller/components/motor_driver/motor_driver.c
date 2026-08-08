@@ -36,20 +36,6 @@ static const char *TAG = "MOTOR";
 #define MOTOR_PWM_RESOLUTION_BITS    LEDC_TIMER_11_BIT
 #define MOTOR_PWM_MAX_DUTY           ((1u << 11) - 1u)   // 2047
 
-// ---------------------------------------------------------------------------
-// TODO(bench): Battery compensation constants.
-// MOTOR_NOMINAL_VOLTAGE is the pack voltage the thrust curve was characterised at.
-// A 1S LiHV whoop pack is ~3.8 V nominal, 4.35 V full, ~3.4 V empty.
-// Measure your own pack under load and correct this.
-// ---------------------------------------------------------------------------
-#define MOTOR_NOMINAL_VOLTAGE 3.8f
-#define MOTOR_MIN_VALID_VOLTAGE 2.5f
-#define MOTOR_MAX_VALID_VOLTAGE 5.0f
-
-// Ceiling on the compensation multiplier. Without this, a brown-out reading of 1 V would ask
-// for 3.8x duty and peg every motor.
-#define MOTOR_MAX_COMPENSATION 1.5f
-
 static const int motor_gpio[MOTOR_COUNT] = {
     MOTOR_FRONT_LEFT_GPIO,
     MOTOR_FRONT_RIGHT_GPIO,
@@ -65,7 +51,6 @@ static const ledc_channel_t motor_channel[MOTOR_COUNT] = {
 };
 
 static bool driver_initialized;
-static float battery_voltage = MOTOR_NOMINAL_VOLTAGE;
 static uint32_t last_duty[MOTOR_COUNT];
 
 static float clampf(float value, float min, float max) {
@@ -159,19 +144,15 @@ esp_err_t motor_driver_init(void) {
 // produce usable thrust below roughly 10-15% duty) and no two motors match.
 // To do this properly: measure thrust vs duty for each motor on a scale, then replace this
 // with a per-motor lookup table or polynomial. Until then, expect the drone to need trim.
+//
+// There is deliberately no battery-voltage compensation here: this airframe has no ADC divider
+// on the pack, so there is nothing to measure. As the pack sags, the same command produces less
+// thrust and the drone will need more stick towards the end of a flight - the cascade's
+// integrators absorb the slow part of that on their own.
 static uint32_t motor_thrust_to_duty(float thrust) {
     thrust = clampf(thrust, 0.0f, 1.0f);
 
-    // Battery compensation: as the pack sags below nominal, ask for proportionally more duty.
-    float compensation = 1.0f;
-    if (battery_voltage > MOTOR_MIN_VALID_VOLTAGE) {
-        compensation = clampf(MOTOR_NOMINAL_VOLTAGE / battery_voltage, 1.0f, MOTOR_MAX_COMPENSATION);
-    }
-
-    float duty = thrust * compensation * (float)MOTOR_PWM_MAX_DUTY;
-    duty = clampf(duty, 0.0f, (float)MOTOR_PWM_MAX_DUTY);
-
-    return (uint32_t)lroundf(duty);
+    return (uint32_t)lroundf(thrust * (float)MOTOR_PWM_MAX_DUTY);
 }
 
 esp_err_t motor_set_thrust(int motor_index, float thrust) {
@@ -237,15 +218,6 @@ esp_err_t motor_all_stop(void) {
     }
 
     return first_error;
-}
-
-void motor_update_battery_voltage(float voltage) {
-    // Reject nonsense readings rather than letting a disconnected ADC peg the compensation.
-    if (voltage < MOTOR_MIN_VALID_VOLTAGE || voltage > MOTOR_MAX_VALID_VOLTAGE) {
-        return;
-    }
-
-    battery_voltage = voltage;
 }
 
 uint32_t motor_get_last_duty(int motor_index) {

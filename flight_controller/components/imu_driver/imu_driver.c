@@ -16,12 +16,13 @@ static const char *TAG = "IMU";
 #define MPU_9250_WHO_AM_I 0x74
 
 //harta registrilor...
-#define REG_CONFIG       0x1A // Filtrul Low-Pass (DLPF)
-#define REG_GYRO_CONFIG  0x1B // Scala Giroscopului
-#define REG_ACCEL_CONFIG 0x1C // Scala Accelerometrului
-#define REG_ACCEL_XOUT_H 0x3B // Adresa de start a datelor (urmează Y, Z și Gyro)
-#define REG_PWR_MGMT_1   0x6B // Power Management (Wake-up)
-#define REG_WHO_AM_I     0x75 // Identificatorul senzorului
+#define REG_CONFIG        0x1A // Filtrul Low-Pass (DLPF) - doar pentru gyro
+#define REG_GYRO_CONFIG   0x1B // Scala Giroscopului
+#define REG_ACCEL_CONFIG  0x1C // Scala Accelerometrului
+#define REG_ACCEL_CONFIG2 0x1D // Filtrul Low-Pass (DLPF) al accelerometrului
+#define REG_ACCEL_XOUT_H  0x3B // Adresa de start a datelor (urmează Y, Z și Gyro)
+#define REG_PWR_MGMT_1    0x6B // Power Management (Wake-up)
+#define REG_WHO_AM_I      0x75 // Identificatorul senzorului
 
 #define RoomTemp_Offset 0.0f //conform datasheet
 #define Temp_Sensitivity  333.87f //conform datasheet
@@ -85,6 +86,15 @@ esp_err_t imu_setup(void) {
     ESP_ERROR_CHECK(imu_write_reg(REG_GYRO_CONFIG, 0x18)); // +/- 2000dps
     ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG, 0x10)); // +/- 8g
 
+    // REG_CONFIG de mai sus filtreaza DOAR giroscopul. Accelerometrul are propriul DLPF, in
+    // ACCEL_CONFIG_2, si valoarea lui dupa reset este 0x00 = 460 Hz banda (register map, tabelul
+    // "Accelerometer Data Rates and Bandwidths"). Fara scrierea de mai jos accelerometrul rula
+    // nefiltrat la 460 Hz in timp ce giroscopul rula la 41 Hz: vibratia elicelor intra direct in
+    // accelerometru, iar filtrul complementar - care crede ca acceleratia arata unde e "jos" -
+    // primeste zgomot in loc de gravitatie, deci dronele nu isi mai tine unghiurile.
+    // A_DLPF_CFG = 3 -> 41 Hz, 11.8 ms intarziere, deci aceeasi banda ca giroscopul.
+    ESP_ERROR_CHECK(imu_write_reg(REG_ACCEL_CONFIG2, 0x03)); // DLPF accelerometru la 41 Hz
+
     uint8_t who_am_i = 0;
     esp_err_t error;
     if ((error = imu_read_reg(REG_WHO_AM_I, &who_am_i, 1)) != ESP_OK) {
@@ -138,26 +148,97 @@ void imu_convert_raw_to_physical(imu_raw_data_t *raw_data, imu_physical_data_t *
     physical_data->gyro_z_dps = (raw_data->gyro_z_raw - gyro_offset_z) / Gyro_Sensitivity;
 }
 
-void imu_calibrate_gyro(void) {
-    ESP_LOGI(TAG, "Calibrating gyro... Please keep the IMU stationary.");
-    imu_raw_data_t raw_data;
-    float sum_x = 0.0f, sum_y = 0.0f, sum_z = 0.0f;
-    const int num_samples = 500;
+// Numarul de esantioane per incercare. 1000 x 2 ms = 2 s de mediere, dublu fata de cat era
+// inainte: eroarea de estimare a bias-ului scade cu radacina din numarul de esantioane, iar
+// bias-ul pe Z este exact cel care face drona sa se roteasca incet fara ca ea sa "vada" asta.
+#define GYRO_CALIB_SAMPLES 1000
 
-    for (int i = 0; i < num_samples; i++) {
-        if (imu_read_raw_data(&raw_data) == ESP_OK) {
-            sum_x += raw_data.gyro_x_raw;
-            sum_y += raw_data.gyro_y_raw;
-            sum_z += raw_data.gyro_z_raw;
+// Cat de mult are voie sa varieze o axa (raw LSB, varf la varf) in timpul ferestrei ca sa
+// consideram ca IMU chiar a stat nemiscat. La 16.4 LSB/dps, 200 LSB ~ 12 dps.
+//
+// Pragul e deliberat larg. Varful-la-varf peste 1000 de esantioane este ~6.6 sigma, iar acest
+// senzor raporteaza WHO_AM_I = 0x74, deci nu e o piesa InvenSense originala - zgomotul unei
+// clone e de cateva ori peste cel din datasheet. Un prag strans ar da alarme false la fiecare
+// pornire, ceea ce e mai rau decat verificarea care lipsea inainte. O drona tinuta in mana
+// arata sute de LSB, deci 200 tot o prinde.
+//
+// TODO(bench): mesajul de la finalul calibrarii afiseaza "worst spread" masurat. Uita-te la el
+// pe hardware-ul tau dupa cateva porniri si strange pragul la ~3x valoarea tipica.
+#define GYRO_CALIB_MAX_SPREAD_LSB 200.0f
+
+#define GYRO_CALIB_MAX_ATTEMPTS 3
+
+void imu_calibrate_gyro(void) {
+    imu_raw_data_t raw_data;
+
+    for (int attempt = 1; attempt <= GYRO_CALIB_MAX_ATTEMPTS; attempt++) {
+        ESP_LOGI(TAG, "Calibrating gyro (attempt %d/%d)... Please keep the IMU stationary.",
+                 attempt, GYRO_CALIB_MAX_ATTEMPTS);
+
+        float sum[3] = {0.0f, 0.0f, 0.0f};
+        float minimum[3] = {0.0f}, maximum[3] = {0.0f};
+        int good_samples = 0;
+
+        for (int i = 0; i < GYRO_CALIB_SAMPLES; i++) {
+            if (imu_read_raw_data(&raw_data) == ESP_OK) {
+                const float axis[3] = {
+                    (float)raw_data.gyro_x_raw,
+                    (float)raw_data.gyro_y_raw,
+                    (float)raw_data.gyro_z_raw,
+                };
+
+                for (int a = 0; a < 3; a++) {
+                    sum[a] += axis[a];
+                    if (good_samples == 0 || axis[a] < minimum[a]) minimum[a] = axis[a];
+                    if (good_samples == 0 || axis[a] > maximum[a]) maximum[a] = axis[a];
+                }
+                good_samples++;
+            }
+            vTaskDelay(pdMS_TO_TICKS(2));
         }
-        vTaskDelay(pdMS_TO_TICKS(2)); 
+
+        if (good_samples == 0) {
+            ESP_LOGE(TAG, "Gyro calibration read no samples at all - I2C bus problem?");
+            continue;
+        }
+
+        // --- Motion check ----------------------------------------------------
+        // Averaging a window in which the drone was moved produces a plausible-looking offset
+        // that is simply wrong, and the old code did that silently. A wrong Z offset is
+        // indistinguishable in flight from a drone that slowly rotates on its own, because the
+        // controller subtracts the bad offset and concludes the yaw rate is zero.
+        float worst_spread = 0.0f;
+        int worst_axis = 0;
+        for (int a = 0; a < 3; a++) {
+            const float spread = maximum[a] - minimum[a];
+            if (spread > worst_spread) {
+                worst_spread = spread;
+                worst_axis = a;
+            }
+        }
+
+        if (worst_spread > GYRO_CALIB_MAX_SPREAD_LSB) {
+            ESP_LOGW(TAG, "Gyro moved during calibration (axis %c spread %.0f LSB = %.1f dps, limit %.0f) - retrying",
+                     "XYZ"[worst_axis], worst_spread, worst_spread / Gyro_Sensitivity,
+                     GYRO_CALIB_MAX_SPREAD_LSB);
+            continue;
+        }
+
+        gyro_offset_x = sum[0] / good_samples;
+        gyro_offset_y = sum[1] / good_samples;
+        gyro_offset_z = sum[2] / good_samples;
+
+        ESP_LOGI(TAG, "Gyro calibration complete: offsets - X: %.2f, Y: %.2f, Z: %.2f (%.2f dps on Z, worst spread %.0f LSB)",
+                 gyro_offset_x, gyro_offset_y, gyro_offset_z,
+                 gyro_offset_z / Gyro_Sensitivity, worst_spread);
+        return;
     }
 
-    gyro_offset_x = sum_x / num_samples;
-    gyro_offset_y = sum_y / num_samples;
-    gyro_offset_z = sum_z / num_samples;
-
-    ESP_LOGI(TAG, "Gyro calibration complete: offsets - X: %.2f, Y: %.2f, Z: %.2f", gyro_offset_x, gyro_offset_y, gyro_offset_z);
+    // Every attempt saw motion. Carrying on with whatever offsets we have is still better than
+    // never finishing boot - but say so loudly, because yaw will drift and roll/pitch will lean.
+    ESP_LOGE(TAG, "Gyro calibration FAILED after %d attempts - the drone was never still. "
+                  "Offsets left at X: %.2f, Y: %.2f, Z: %.2f. Reboot on a stable surface.",
+             GYRO_CALIB_MAX_ATTEMPTS, gyro_offset_x, gyro_offset_y, gyro_offset_z);
 }
 
 void imu_calibrate_acc(void) {

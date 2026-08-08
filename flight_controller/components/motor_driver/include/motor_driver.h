@@ -30,7 +30,8 @@
 esp_err_t motor_driver_init(void);
 
 // Sets one motor's thrust as a normalised command.
-// Applies the thrust->duty map and battery voltage compensation.
+// Applies the thrust->duty map. There is no battery-voltage compensation - the airframe has no
+// pack ADC, so thrust maps straight to duty and a sagging pack simply produces less thrust.
 // @param motor_index 0..3, see the MOTOR_* defines above.
 // @param thrust 0.0 (stopped) .. 1.0 (full). Values outside the range are clamped.
 // @return ESP_OK on success, ESP_ERR_INVALID_ARG for a bad index, ESP_ERR_INVALID_STATE if
@@ -43,7 +44,7 @@ esp_err_t motor_set_thrust(int motor_index, float thrust);
 // @return ESP_OK if every channel succeeded, otherwise the first error encountered.
 esp_err_t motor_set_thrust_all(const float thrust[MOTOR_COUNT]);
 
-// Writes a raw LEDC duty value, bypassing the thrust curve and battery compensation.
+// Writes a raw LEDC duty value, bypassing the thrust curve.
 // Bench testing only - this is how you find HOVER_THROTTLE and check motor wiring.
 // @param motor_index 0..3.
 // @param duty Raw duty, 0 .. (2^MOTOR_PWM_RESOLUTION_BITS - 1). Clamped to the maximum.
@@ -55,12 +56,6 @@ esp_err_t motor_set_raw_duty(int motor_index, uint32_t duty);
 // Attempts all four channels regardless of individual failures.
 // @return ESP_OK if every channel stopped, otherwise the first error encountered.
 esp_err_t motor_all_stop(void);
-
-// Updates the battery voltage used for thrust compensation.
-// As the pack sags, the same duty cycle produces less thrust; compensation scales duty up to
-// keep the thrust->command relationship roughly constant through the flight.
-// @param voltage Measured pack voltage in volts. Values outside a sane range are ignored.
-void motor_update_battery_voltage(float voltage);
 
 // Returns the duty most recently written to a motor, for telemetry and bench inspection.
 // @param motor_index 0..3.
