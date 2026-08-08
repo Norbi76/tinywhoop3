@@ -25,7 +25,7 @@ static const char *TAG = "CONTROL_STATE";
 
 // Throttle trim: persistent, no decay. 25%/second is slow enough to be controllable with a
 // button and fast enough to get off the ground without a long press.
-#define THROTTLE_TRIM_RATE_PER_S 0.25f
+#define THROTTLE_TRIM_RATE_PER_S 0.1f
 #define THROTTLE_MAX 0.85f          // headroom left for the attitude loops to mix in
 
 // ---------------------------------------------------------------------------
@@ -317,6 +317,17 @@ void control_state_get_frame(telemetry_control_payload_t *out) {
     }
 
     xSemaphoreGive(state_mutex);
+}
+
+float control_state_get_throttle_trim(void) {
+    if (state_mutex == NULL || xSemaphoreTake(state_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+        return 0.0f;
+    }
+
+    const float trim = state.throttle_trim;
+
+    xSemaphoreGive(state_mutex);
+    return trim;
 }
 
 void control_state_store_status(const telemetry_status_payload_t *status) {

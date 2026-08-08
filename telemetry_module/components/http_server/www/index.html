@@ -96,6 +96,10 @@ summary{cursor:pointer;font-size:12px;color:#8fa3c0;text-transform:uppercase;let
 <!-- Altitude and yaw -->
 <div class="group">
   <h2>Altitude (trim) / Yaw</h2>
+  <div class="row" style="justify-content:space-between;margin-bottom:6px">
+    <span style="font-size:12px;color:#8fa3c0">Throttle trim</span>
+    <span id="s_trim" style="font-variant-numeric:tabular-nums;font-weight:600">-</span>
+  </div>
   <div class="half" style="margin-bottom:6px">
     <div class="btn" data-btn="throttle_up">ALT +</div>
     <div class="btn" data-btn="throttle_down">ALT &minus;</div>
@@ -373,6 +377,7 @@ function refresh() {
     setText('s_yaw', d.yaw.toFixed(1) + '°');
     setText('s_alt', d.alt_valid ? d.altitude.toFixed(2) + ' m' : 'n/a');
     setText('s_batt', d.battery.toFixed(2) + ' V');
+    setText('s_trim', Math.round(d.throttle_trim * 100) + '%');
     setText('s_hz', d.loop_hz);
     setText('s_shots', d.shots_written + '/' + d.shots_requested +
                        (d.shots_failed ? ' (' + d.shots_failed + ' fail)' : ''));

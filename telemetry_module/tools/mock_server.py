@@ -373,6 +373,7 @@ class DroneSim:
                 "vx": round(self.velocity_x, 3),
                 "vy": round(self.velocity_y, 3),
                 "battery": round(self.battery, 2),
+                "throttle_trim": round(self.throttle_trim, 3),
                 "loop_hz": self.loop_hz,
                 "motors": [round(m, 3) for m in self.motors],
                 "status_age_ms": age_ms,

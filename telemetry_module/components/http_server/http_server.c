@@ -275,6 +275,7 @@ static esp_err_t handler_status(httpd_req_t *req) {
              "\"altitude\":%.3f,\"climb\":%.3f,"
              "\"vx\":%.3f,\"vy\":%.3f,"
              "\"battery\":%.2f,"
+             "\"throttle_trim\":%.3f,"
              "\"loop_hz\":%u,"
              "\"motors\":[%.3f,%.3f,%.3f,%.3f],"
              "\"status_age_ms\":%ld,"
@@ -294,6 +295,7 @@ static esp_err_t handler_status(httpd_req_t *req) {
              status.altitude, status.climb_rate,
              status.velocity_x, status.velocity_y,
              status.battery_voltage,
+             (double)control_state_get_throttle_trim(),
              status.loop_hz,
              status.motor[0], status.motor[1], status.motor[2], status.motor[3],
              (long)status_age_ms,

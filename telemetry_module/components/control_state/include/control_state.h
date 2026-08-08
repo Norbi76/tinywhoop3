@@ -62,6 +62,10 @@ void control_state_update(float dt);
 // @param out Destination, must not be NULL.
 void control_state_get_frame(telemetry_control_payload_t *out);
 
+// Current throttle trim, 0.0-1.0. Read back by the dashboard so the ALT+/ALT- buttons can show
+// the pilot what they've actually asked for, not just what they last pressed.
+float control_state_get_throttle_trim(void);
+
 // Stores the most recent status frame received from the flight controller.
 // @param status The decoded status payload. NULL is ignored.
 void control_state_store_status(const telemetry_status_payload_t *status);
