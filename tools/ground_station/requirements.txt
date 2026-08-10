@@ -1,0 +1,7 @@
+# Desktop ground station for live PID tuning. Not part of any ESP-IDF build.
+#
+# pyqtgraph rather than matplotlib: this redraws several thousand points at 30 Hz, which
+# matplotlib cannot do without dropping frames.
+PyQt6>=6.5
+pyqtgraph>=0.13
+numpy>=1.24
