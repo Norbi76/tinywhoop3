@@ -1,0 +1,27 @@
+# Bench tool build defaults - deliberately minimal.
+#
+# Do NOT copy ../flight_controller/sdkconfig.defaults here. That file selects a custom partition
+# table (CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv") which does not exist in this
+# project, and its 1000 Hz tick / perf optimisation exist to serve a 1 kHz control loop that this
+# tool does not have. The stock IDF defaults are correct for a single-shot bench program.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---------------------------------------------------------------------------
+# 1 kHz tick - required, and for a DIFFERENT reason than the flight controller needs it.
+# The FC needs it because vTaskDelayUntil() cannot resolve finer than one tick. Here it is
+# because the code being reused assumes vTaskDelay() has millisecond resolution, and at the IDF
+# default of 100 Hz one tick is 10 ms, so pdMS_TO_TICKS() of anything under 10 truncates to ZERO:
+#   - vl53l1x_driver.c's boot-state poll delays 2 ms per attempt -> becomes a bare I2C spin,
+#     collapsing the 100-attempt boot wait into almost no wall-clock time.
+#   - vl53l1_platform.c's VL53L1_WaitMs() is a vTaskDelay(), and ST's CalibrateOffset() calls it
+#     with 1 ms inside its 1000-poll data-ready loop -> that timeout budget shrinks from ~1 s to
+#     a few hundred ms, against a sensor that only produces a measurement every 25 ms.
+#   - sample_mean() in main.c polls on the same 2 ms delay.
+# None of this changes the offset (cadence is set by the sensor's 25 ms inter-measurement period,
+# not by host delays), but it burns CPU and makes the boot wait marginal.
+# ---------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+
+# The calibration result is printed as a float average; keep line endings sane in idf.py monitor.
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
