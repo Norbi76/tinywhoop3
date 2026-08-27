@@ -23,10 +23,53 @@ than pressing made it move — that asymmetry is what makes a button interface f
 `update_axis()` treats "both buttons held" identically to "neither held": no commanded direction,
 so decay to neutral. That avoids having to define what left+right simultaneously means.
 
-| Axis | Limit | Ramp | Decay |
-|---|---|---|---|
-| Roll / pitch | ±15° | 30 °/s | 60 °/s |
-| Yaw **rate** | ±90 °/s | 180 °/s² | 360 °/s² |
+| Axis | Limit | Press step | Ramp | Decay |
+|---|---|---|---|---|
+| Roll / pitch | ±15° | **±5°** | 45 °/s | 90 °/s |
+| Yaw **rate** | ±90 °/s | — | 180 °/s² | 360 °/s² |
+
+### The press step — why roll/pitch is not a pure ramp
+
+A pure ramp from zero means the first fraction of a second of a press commands almost nothing:
+at the old 30 °/s the setpoint was 3° after 100 ms, and 3° of tilt is not a visible manoeuvre on
+a tinywhoop. The pilot's instinctive fix is to hold the button longer, which is exactly the
+*"I have to hold FWD/BACK/LEFT/RIGHT far too long before anything happens"* complaint — and it
+also decouples the press from the response, so corrections get over-applied.
+
+So `apply_press_kick()` runs **before** `update_axis()` on roll and pitch. The instant an axis
+acquires a *new* commanded direction, the setpoint jumps to ±`ROLL_PITCH_KICK_DEG` and the ramp
+carries on from there:
+
+```
+  press edge →  |setpoint| = max(|setpoint|, 5°) in the commanded direction
+  then         →  ramp_towards(±15°, 45 °/s, dt)   as before
+```
+
+Three properties matter:
+
+- It fires on the **edge**, not while held — one step per press, then a normal ramp.
+- It only ever moves the axis *further* in the commanded direction. If the axis is already past
+  5° the press changes nothing.
+- **Reversing snaps across immediately.** Going from +15° to a left press lands on −5° in one
+  tick. That is the case that used to be worst: a full second of holding before the setpoint even
+  reached neutral, which is unusable for catching a drift.
+
+"Commanded" uses the same definition as `update_axis()` — positive held *and* negative not held —
+so left+right together is still no direction and never kicks.
+
+**Yaw and throttle are deliberately left as pure ramps.** Their buttons are for placing the drone
+slowly; a step there would be a step in *yaw rate* or *climb rate*, which is not what those
+controls are for. The pilot reported the same slowness on ALT± and YAW and said it did not bother
+them there.
+
+Tuning: 5° is a third of full authority, instantly. Raise `ROLL_PITCH_KICK_DEG` for a twitchier
+response, lower it if the drone snaps. `ROLL_PITCH_RAMP_DPS` went 30 → 45 °/s alongside it (decay
+tracked it 60 → 90 to keep the 2× relationship), so from the step the axis still reaches full
+deflection in ~220 ms.
+
+The dashboard also posts the press and release **immediately** rather than waiting for the next
+20 Hz tick, which removes up to 50 ms of dead time in front of all of this. The fixed-rate POST
+is unchanged and still what the watchdogs below measure.
 
 15° is deliberately gentle — this is an indoor drone flying near objects. These bound what the
 dashboard may *ask* for; the flight controller clamps again on its side (±25°), so these are the
@@ -172,5 +215,5 @@ buttons, reads status).
 | File | Contents |
 |---|---|
 | `include/control_state.h` | `control_buttons_t`, thirteen public functions, the ramp/decay contract. |
-| `control_state.c` | Limits and rates, both watchdogs, `update_axis()`, the two mutexes, frame assembly. |
+| `control_state.c` | Limits and rates, both watchdogs, `apply_press_kick()` + `update_axis()`, the two mutexes, frame assembly. |
 | `CMakeLists.txt` | Component registration. |

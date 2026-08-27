@@ -19,6 +19,10 @@
 //   than from the HTTP handler - so the ramp rates do not silently change when the browser
 //   stutters. Throttle is the deliberate exception: a persistent trim with no decay branch.
 //
+//   ROLL AND PITCH ADDITIONALLY STEP on the edge of a press, before the ramp, so the FWD / BACK /
+//   LEFT / RIGHT buttons produce a visible response on the first frame instead of creeping up
+//   from zero. Yaw rate and throttle stay pure ramps - a step there would be a step in rate.
+//
 // TWO WATCHDOGS LIVE HERE, and the second one is the non-obvious one:
 //   500 ms without a POST -> release directional inputs, KEEP the throttle (level out, hold height)
 //     3 s without a POST -> drop the arm request outright

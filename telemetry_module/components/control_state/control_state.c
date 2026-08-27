@@ -12,6 +12,11 @@
 //   and is shared by roll, pitch and yaw. Throttle deliberately does NOT go through update_axis()
 //   - it has no decay branch at all, which is what makes button-driven altitude possible.
 //
+//   ROLL AND PITCH GET ONE EXTRA STAGE: apply_press_kick() steps the axis straight to
+//   ROLL_PITCH_KICK_DEG on the edge of a new press, before the ramp runs, so FWD/BACK/LEFT/RIGHT
+//   respond on the first frame instead of creeping up from zero. Yaw and throttle are left as
+//   pure ramps on purpose - see the comment at ROLL_PITCH_KICK_DEG.
+//
 // WHY TWO MUTEXES
 //   state_mutex and status_mutex guard disjoint data touched by different tasks on different
 //   clocks. The HTTP handler serving /api/status must not contend with the UART TX task
@@ -45,10 +50,34 @@ static const char *TAG = "CONTROL_STATE";
 // Ramp and decay rates, in units per second.
 // Decay is deliberately ~2x the ramp rate: releasing a button should settle the drone faster
 // than pressing it made it move.
-#define ROLL_PITCH_RAMP_DPS 30.0f
-#define ROLL_PITCH_DECAY_DPS 60.0f
+#define ROLL_PITCH_RAMP_DPS 45.0f
+#define ROLL_PITCH_DECAY_DPS 90.0f
 #define YAW_RAMP_DPS2 180.0f
 #define YAW_DECAY_DPS2 360.0f
+
+// ---------------------------------------------------------------------------
+// FWD / BACK / LEFT / RIGHT: immediate step on press, then ramp.
+//
+// A pure ramp from zero means the first tenth of a second of a press commands almost nothing:
+// at 30 deg/s the setpoint is 3 deg after 100 ms, and 3 deg of tilt on a tinywhoop is not a
+// visible manoeuvre. The pilot's fix for that is to hold the button longer, which is exactly
+// the "I have to hold it too long before anything happens" complaint - and it also means the
+// press and the response feel disconnected, so corrections get over-applied.
+//
+// So the moment an axis acquires a NEW commanded direction, the setpoint jumps straight to
+// ROLL_PITCH_KICK_DEG in that direction and ramps on from there. A tap is now a real nudge; a
+// hold still builds to the full +/-15 deg, just from a running start.
+//
+// This is applied to ROLL and PITCH ONLY. Yaw rate and the throttle trim keep their pure ramp:
+// their buttons are used to place the drone slowly and deliberately, and a step there would be
+// a step in yaw rate / climb rate, which is not what those controls are for.
+//
+// TUNING: 5 deg of the 15 deg limit - a third of full authority, instantly. Raise it for a
+// twitchier response, lower it if the drone feels like it snaps. The ramp rate above was raised
+// 30 -> 45 deg/s to match, keeping the documented decay = 2 x ramp relationship, so from the
+// kick the axis still reaches full deflection in ~220 ms.
+// ---------------------------------------------------------------------------
+#define ROLL_PITCH_KICK_DEG 5.0f
 
 // Throttle trim: persistent, no decay. 10%/second is slow enough to be controllable with a
 // button and fast enough to get off the ground without a long press.
@@ -77,6 +106,9 @@ static const char *TAG = "CONTROL_STATE";
 
 typedef struct {
     control_buttons_t buttons;
+    // What the buttons were on the PREVIOUS 50 Hz tick. Only used to spot the edge where an axis
+    // acquires a new commanded direction, which is what fires the press kick below.
+    control_buttons_t prev_buttons;
 
     float roll_deg;
     float pitch_deg;
@@ -130,6 +162,34 @@ static float update_axis(float current, bool positive_held, bool negative_held,
 
     const float target = positive_held ? limit : -limit;
     return ramp_towards(current, target, ramp_rate, dt);
+}
+
+// Steps an axis to +/-`kick` the instant it acquires a NEW commanded direction, so a press
+// produces a visible response on the very first frame instead of ramping up out of nothing.
+//
+// "Commanded positive" means positive held AND negative not held - the same definition
+// update_axis() uses, so left+right together is still "no direction" and never kicks.
+//
+// The kick fires on the EDGE of that condition, not while it persists, so holding a button
+// kicks once and then ramps. It only ever moves the axis further in the commanded direction:
+// if the axis is already past the kick value the press changes nothing and the ramp continues
+// undisturbed. Reversing direction snaps across to the far side immediately, which is exactly
+// what is wanted when catching a drift - that is the one case that used to take a full second
+// of holding before the drone even reached neutral.
+static float apply_press_kick(float current, bool positive_held, bool negative_held,
+                              bool positive_was, bool negative_was, float kick) {
+    const bool commanded_positive = positive_held && !negative_held;
+    const bool commanded_negative = negative_held && !positive_held;
+    const bool was_positive = positive_was && !negative_was;
+    const bool was_negative = negative_was && !positive_was;
+
+    if (commanded_positive && !was_positive) {
+        if (current < kick) current = kick;
+    } else if (commanded_negative && !was_negative) {
+        if (current > -kick) current = -kick;
+    }
+
+    return current;
 }
 
 esp_err_t control_state_init(void) {
@@ -285,11 +345,21 @@ void control_state_update(float dt) {
         }
     }
 
-    // --- Roll and pitch: ramp on hold, decay on release ----------------------
+    // --- Roll and pitch: step on press, then ramp on hold, decay on release --
+    // The kick runs BEFORE the ramp, so the tick that first sees a press delivers the step and
+    // the ramp continues from there in the same tick - the pilot never sees a frame at zero.
+    state.roll_deg = apply_press_kick(state.roll_deg,
+                                      state.buttons.roll_right, state.buttons.roll_left,
+                                      state.prev_buttons.roll_right, state.prev_buttons.roll_left,
+                                      ROLL_PITCH_KICK_DEG);
     state.roll_deg = update_axis(state.roll_deg,
                                  state.buttons.roll_right, state.buttons.roll_left,
                                  MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS, ROLL_PITCH_DECAY_DPS, dt);
 
+    state.pitch_deg = apply_press_kick(state.pitch_deg,
+                                       state.buttons.pitch_forward, state.buttons.pitch_back,
+                                       state.prev_buttons.pitch_forward, state.prev_buttons.pitch_back,
+                                       ROLL_PITCH_KICK_DEG);
     state.pitch_deg = update_axis(state.pitch_deg,
                                   state.buttons.pitch_forward, state.buttons.pitch_back,
                                   MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS, ROLL_PITCH_DECAY_DPS, dt);
@@ -316,6 +386,11 @@ void control_state_update(float dt) {
     if (!state.arm_request) {
         state.throttle_trim = 0.0f;
     }
+
+    // Edge reference for the next tick. Must be the LAST thing touched: the watchdog above can
+    // have zeroed state.buttons, and that synthesised release has to be remembered as a release,
+    // so the browser coming back counts as a fresh press and kicks again.
+    state.prev_buttons = state.buttons;
 
     xSemaphoreGive(state_mutex);
 }

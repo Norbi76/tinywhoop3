@@ -26,7 +26,10 @@
 
        Input is posted at a FIXED RATE rather than as an event per press. That is what lets the
        firmware run a browser watchdog at all: silence is unambiguous, whereas with edge events
-       "no message" and "no change" look identical.
+       "no message" and "no change" look identical. Press and release ALSO post immediately, on
+       top of the fixed rate - that is a latency optimisation, not a replacement for it: the
+       20 Hz heartbeat still carries the same state and the watchdog still only ever looks at
+       silence.
 
        The 20 Hz input POST is NON-OVERLAPPING: a tick is skipped while the previous POST is
        still in flight, and any POST still open after INPUT_TIMEOUT_MS is aborted. Without this
@@ -231,12 +234,20 @@ function bindHold(el) {
     if (el.setPointerCapture && e.pointerId !== undefined) {
       try { el.setPointerCapture(e.pointerId); } catch (err) {}
     }
+    // Don't wait for the next 20 Hz tick. The fixed-rate POST is what the firmware's watchdog
+    // needs, but on its own it adds up to 50 ms of dead time between the thumb going down and
+    // the board hearing about it - on top of the link round trip. Posting the edge immediately
+    // removes that, and sendInput() is already non-overlapping, so this can only ever replace a
+    // tick that was about to fire, never stack another request on top of one in flight.
+    sendInput();
   }
 
   function release(e) {
     if (e) e.preventDefault();
     held[name] = false;
     el.classList.remove('held');
+    // Same on the way up: the sooner the board sees the release, the sooner the axis decays.
+    sendInput();
   }
 
   el.addEventListener('pointerdown', press);

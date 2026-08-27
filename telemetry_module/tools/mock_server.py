@@ -78,8 +78,12 @@ LOOP_NAMES = [
 # --- Mirrored from components/control_state/control_state.c --------------------------------
 MAX_ROLL_PITCH_DEG = 15.0
 MAX_YAW_RATE_DPS = 90.0
-ROLL_PITCH_RAMP_DPS = 30.0
-ROLL_PITCH_DECAY_DPS = 60.0
+ROLL_PITCH_RAMP_DPS = 45.0
+ROLL_PITCH_DECAY_DPS = 90.0
+# Immediate step applied to roll/pitch on the edge of a new press, so FWD/BACK/LEFT/RIGHT respond
+# on the first frame rather than ramping up out of nothing. Roll and pitch only - yaw and the
+# throttle trim stay pure ramps. See the comment at ROLL_PITCH_KICK_DEG in control_state.c.
+ROLL_PITCH_KICK_DEG = 5.0
 YAW_RAMP_DPS2 = 180.0
 YAW_DECAY_DPS2 = 360.0
 THROTTLE_TRIM_RATE_PER_S = 0.25
@@ -126,6 +130,27 @@ def update_axis(current, positive_held, negative_held, limit, ramp_rate, decay_r
     return ramp_towards(current, target, ramp_rate, dt)
 
 
+def apply_press_kick(current, positive_held, negative_held, positive_was, negative_was, kick):
+    """Step the axis to +/-kick the instant it acquires a NEW commanded direction.
+
+    Fires on the edge, not while the button is held, and only ever moves the axis further in the
+    commanded direction. Line-for-line mirror of apply_press_kick() in control_state.c.
+    """
+    commanded_positive = positive_held and not negative_held
+    commanded_negative = negative_held and not positive_held
+    was_positive = positive_was and not negative_was
+    was_negative = negative_was and not positive_was
+
+    if commanded_positive and not was_positive:
+        if current < kick:
+            current = kick
+    elif commanded_negative and not was_negative:
+        if current > -kick:
+            current = -kick
+
+    return current
+
+
 class DroneSim:
     """Pilot-side control state plus a toy flight model, stepped at SIM_HZ on its own thread."""
 
@@ -141,6 +166,8 @@ class DroneSim:
 
             # Pilot request state (control_state.c)
             self.buttons = {key: False for key in BUTTON_KEYS}
+            # Previous tick's buttons, for the press-edge detection that fires the roll/pitch kick.
+            self.prev_buttons = {key: False for key in BUTTON_KEYS}
             self.roll_sp = 0.0
             self.pitch_sp = 0.0
             self.yaw_rate_sp = 0.0
@@ -272,10 +299,22 @@ class DroneSim:
                     self.throttle_trim = 0.0
 
             # --- Setpoint integration ----------------------------------------------------
+            # Roll and pitch get the press kick first, then the ramp, in the same tick.
+            self.roll_sp = apply_press_kick(self.roll_sp,
+                                            self.buttons["roll_right"], self.buttons["roll_left"],
+                                            self.prev_buttons["roll_right"],
+                                            self.prev_buttons["roll_left"],
+                                            ROLL_PITCH_KICK_DEG)
             self.roll_sp = update_axis(self.roll_sp,
                                        self.buttons["roll_right"], self.buttons["roll_left"],
                                        MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS,
                                        ROLL_PITCH_DECAY_DPS, dt)
+            self.pitch_sp = apply_press_kick(self.pitch_sp,
+                                             self.buttons["pitch_forward"],
+                                             self.buttons["pitch_back"],
+                                             self.prev_buttons["pitch_forward"],
+                                             self.prev_buttons["pitch_back"],
+                                             ROLL_PITCH_KICK_DEG)
             self.pitch_sp = update_axis(self.pitch_sp,
                                         self.buttons["pitch_forward"], self.buttons["pitch_back"],
                                         MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS,
@@ -292,6 +331,10 @@ class DroneSim:
             self.throttle_trim = clamp(self.throttle_trim, 0.0, THROTTLE_MAX)
             if not self.arm_request:
                 self.throttle_trim = 0.0
+
+            # Edge reference for the next tick. Last, so the watchdog's synthesised release above
+            # is remembered as a release and the browser coming back counts as a fresh press.
+            self.prev_buttons = dict(self.buttons)
 
             # --- Arming gate ---------------------------------------------------------------
             if self.killed:
