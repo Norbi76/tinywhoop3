@@ -1,3 +1,35 @@
+// camera_sd.c - camera bring-up, exposure locking, the capture task, and SD writing.
+//
+// LAYOUT
+//   pin definitions            camera and SD, both FIXED by the XIAO Sense's connector
+//   exposure / mode constants  calibration frames, AE bias, WB mode, quality, preview settings
+//   module state               camera_ok/sd_ok, the locked exposure, the preview buffer
+//   calibrate_exposure()       measure the scene, then pin the sensor there
+//   enter_preview_mode()       \  the two sensor configurations. CAPTURE-TASK CONTEXT ONLY.
+//   enter_capture_mode()       /
+//   refresh_preview()          grab one viewfinder frame into the shared buffer
+//   init_camera / init_sd / scan_existing_files / camera_sd_init()
+//   write_one() / capture_one() / camera_sd_task()
+//   the public flag-setting and stats-reading functions
+//
+// THE TWO IDEAS BEHIND ALL OF IT
+//   1. Exposure is MEASURED at boot and then LOCKED, because photogrammetry needs every shot in a
+//      set to share one exposure - auto-exposure drift reads as geometry to a reconstruction
+//      pipeline. See calibrate_exposure().
+//   2. Nothing slow happens anywhere near the control path. An SD write can block for hundreds of
+//      milliseconds, so the HTTP handler only queues a token and this task (core 1, priority 3)
+//      does the work.
+//
+// THE CONCURRENCY MODEL IN ONE LINE
+//   The capture task OWNS the sensor. No other task ever calls into the camera driver, which is
+//   why there is no sensor lock anywhere in this file - the HTTP handler sets preview_requested
+//   and returns. Everything else shared is a spinlock (stats), a mutex (preview buffer) or a
+//   queue (capture requests).
+//
+// A RECURRING ORDERING RULE, applied in three places: when writing fixed exposure/gain values,
+// turn the automatics OFF FIRST and only then write the registers. Disabling the AEC loop can
+// leave them at whatever its last iteration wrote.
+
 #include "camera_sd.h"
 #include "esp_camera.h"
 #include "esp_vfs_fat.h"

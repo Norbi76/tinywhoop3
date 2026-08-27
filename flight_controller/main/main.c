@@ -1,3 +1,30 @@
+// main.c - the flight controller's entry point: startup ordering and the three FreeRTOS tasks.
+//
+// WHAT THIS FILE DOES
+//   No control logic of its own. It creates the tasks, brings the components up in an order that
+//   is dictated by hardware dependencies, and owns the cross-task plumbing.
+//
+//     fc_task         core 1, top priority, 1000 Hz - IMU -> attitude -> nav snapshot -> cascade
+//     sensor_task     core 0, prio 6,        100 Hz - lives in sensor_task.c
+//     telemetry_task  core 0, prio 5,         50 Hz - status/debug/IMU out, control+tuning in
+//
+//   The split is by TIMING SENSITIVITY, not by subject. fc_task gets core 1 (APP_CPU) because
+//   core 0 (PRO_CPU) runs Wi-Fi, lwIP and IDF background work; the two slow tasks go on core 0
+//   precisely because their I/O blocks.
+//
+// THE ONE RULE THAT SHAPES EVERYTHING HERE
+//   The 1 kHz side never waits. Every cross-task read in fc_task uses a ZERO timeout and carries
+//   on with its previous copy on failure. Stale data by one cycle is always preferable to a
+//   missed 1 ms deadline.
+//
+// STARTUP ORDER IS NOT ARBITRARY - see the comments in app_main(). Two constraints drive it:
+//   1. Motors must be configured and driven to zero before any code can command thrust.
+//   2. The ToF sensor attaches to the I2C bus that imu_setup() CREATES, and imu_setup() runs
+//      inside fc_task - hence imu_ready_semaphore, which app_main blocks on before starting the
+//      navigation sensors.
+//
+// Some comments in this file are in Romanian (the author's first language) - intentional style.
+
 #include <stdio.h>
 #include <math.h>
 #include "freertos/FreeRTOS.h"
@@ -12,6 +39,7 @@
 #include "nav_estimator.h"
 #include "motor_driver.h"
 #include "flight_control.h"
+#include "pid_registry.h"
 #include "sensor_task.h"
 
 #ifndef M_PI
@@ -21,6 +49,11 @@
 static const char *TAG = "FC_MAIN";
 // #define ALPHA 0.70
 
+// How many PID debug samples the telemetry task forwards per 20 ms cycle. 32 covers 1600
+// samples/second, comfortably above the 500 Hz the ground station asks for at its fastest
+// setting, so the queue only backs up if the UART itself is the bottleneck.
+#define PID_DEBUG_PER_CYCLE 32
+
 static SemaphoreHandle_t imu_data_mutex;
 static telemetry_imu_payload_t latest_imu_payload;
 
@@ -29,6 +62,17 @@ static telemetry_imu_payload_t latest_imu_payload;
 // imu_setup() creates and must not touch it first.
 static SemaphoreHandle_t imu_ready_semaphore;
 
+// THE 1 kHz CONTROL TASK. Core 1, highest priority, and the only writer of the motors.
+//
+// Startup half: owns the IMU end to end (setup + both calibration sweeps), then signals
+// imu_ready_semaphore so app_main can bring up the sensors that share the I2C bus it just made.
+//
+// Loop half, per 1 ms tick:
+//   read IMU -> convert -> compute dt -> publish the IMU telemetry snapshot (zero-timeout mutex)
+//   -> attitude_update/get -> grab the latest nav state (zero-timeout mutex) -> run the cascade.
+//
+// Nothing slow is permitted past the startup half: no logging in the steady-state path, no
+// blocking mutex take, no I/O other than the single IMU burst read.
 void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contina un param de tip void*
     ESP_LOGI(TAG, "Flight controll task started on core %d", xPortGetCoreID());
     //init imu, pwm
@@ -121,6 +165,19 @@ void fc_task(void *args) { //semnatura unui task freeRTOS trebuie sa contina un 
     }
 }
 
+// THE 50 Hz LINK TASK. Core 0. Everything that talks to the telemetry module happens here.
+//
+// TRANSMIT ORDER IS DELIBERATE: status frame, then PID debug, then (every 5th cycle) the raw IMU
+// frame. The status frame is what the dashboard and the pilot depend on, so it goes out first no
+// matter how much tuning traffic is queued behind it.
+//
+// RECEIVE DRAINS THE WHOLE BUFFER rather than taking one frame per cycle - otherwise RX backs up
+// and the control frames actually acted on get progressively staler. It uses the RESYNC reader
+// so one corrupted byte costs a single frame instead of a full flush, because a flush would take
+// good control frames with it and trip flight_control's 300 ms link watchdog.
+//
+// Every inbound handler length-checks payload_len against its struct before casting. That check
+// is the only thing between a truncated frame and a read past the end of the payload buffer.
 void telemetry_task(void *args) {
     //init uart...
     ESP_LOGI(TAG, "Telemtry transmission task started on core %d", xPortGetCoreID());
@@ -142,6 +199,24 @@ void telemetry_task(void *args) {
         );
         if (send_error != ESP_OK) {
             ESP_LOGE(TAG, "Status telemetry send failed: %s", esp_err_to_name(send_error));
+        }
+
+        // --- PID debug samples ---------------------------------------------
+        // Sent after the status frame and before the IMU frame: the status frame is what the
+        // dashboard and the link watchdog depend on, so it goes out first regardless of how much
+        // tuning traffic is queued behind it.
+        //
+        // Bounded drain. Nothing here blocks on the queue (zero wait) - an empty queue ends the
+        // loop immediately, which is the normal case when no loop is subscribed.
+        telemetry_pid_debug_payload_t pid_sample;
+        for (int i = 0; i < PID_DEBUG_PER_CYCLE; i++) {
+            if (!pid_registry_pop_debug(&pid_sample, 0)) {
+                break;
+            }
+
+            // Deliberately unlogged even on failure: this runs up to 32 times per cycle and a
+            // per-sample log line would saturate the console UART on its own.
+            uart_telemetry_send_message(TELEMETRY_MSG_PID_DEBUG, &pid_sample, sizeof(pid_sample));
         }
 
         // --- Raw IMU frame, every 5th cycle (10 Hz) ------------------------
@@ -199,6 +274,53 @@ void telemetry_task(void *args) {
                     }
                     break;
                 }
+                case TELEMETRY_MSG_PID_GAINS: {
+                    if (rx_message.header.payload_len < sizeof(telemetry_pid_gains_payload_t)) {
+                        ESP_LOGW(TAG, "Short PID gains frame: %u bytes", rx_message.header.payload_len);
+                        break;
+                    }
+                    const telemetry_pid_gains_payload_t *gains =
+                        (const telemetry_pid_gains_payload_t *)rx_message.payload;
+
+                    // All six floats exactly zero means "tell me what you have", not "set
+                    // everything to zero" - an all-zero gain set would disable the loop and is
+                    // never something anyone means. See telemetry_uart.h.
+                    const bool is_read_request = (gains->kp == 0.0f && gains->ki == 0.0f &&
+                                                  gains->kd == 0.0f && gains->i_limit == 0.0f &&
+                                                  gains->out_limit == 0.0f &&
+                                                  gains->d_cutoff_hz == 0.0f);
+
+                    if (is_read_request) {
+                        telemetry_pid_gains_payload_t live;
+                        pid_registry_read_gains((pid_loop_id_t)gains->loop_id, &live);
+                        uart_telemetry_send_message(TELEMETRY_MSG_PID_GAINS, &live, sizeof(live));
+                    } else {
+                        pid_registry_apply_gains(gains);
+                    }
+                    break;
+                }
+                case TELEMETRY_MSG_PID_SELECT: {
+                    if (rx_message.header.payload_len < sizeof(telemetry_pid_select_payload_t)) {
+                        ESP_LOGW(TAG, "Short PID select frame: %u bytes", rx_message.header.payload_len);
+                        break;
+                    }
+                    const telemetry_pid_select_payload_t *select =
+                        (const telemetry_pid_select_payload_t *)rx_message.payload;
+
+                    pid_registry_set_stream(select->loop_id, select->divider);
+                    break;
+                }
+                case TELEMETRY_MSG_PID_INJECT: {
+                    if (rx_message.header.payload_len < sizeof(telemetry_pid_inject_payload_t)) {
+                        ESP_LOGW(TAG, "Short PID inject frame: %u bytes", rx_message.header.payload_len);
+                        break;
+                    }
+                    const telemetry_pid_inject_payload_t *inject =
+                        (const telemetry_pid_inject_payload_t *)rx_message.payload;
+
+                    pid_registry_set_inject(inject);
+                    break;
+                }
                 default:
                     // Other message types are not expected on this direction of the link.
                     break;
@@ -211,6 +333,12 @@ void telemetry_task(void *args) {
 
 }
 
+// Brings the system up in a fixed, dependency-driven order and then hands off to the tasks.
+//
+// The order below is load-bearing; the comment at each step says why that step is where it is.
+// Note the asymmetry in failure handling: anything that could let the motors run unsupervised
+// (motor driver, attitude estimator, flight control, UART) is FATAL and returns from app_main,
+// while the navigation sensors are non-fatal and simply leave the outer control loops disengaged.
 void app_main(void)
 {
     ESP_LOGI(TAG, "System starting up...");
@@ -258,8 +386,8 @@ void app_main(void)
     // --- Telemetry link ------------------------------------------------------
     telemetry_uart_config_t uart_config = {
         .uart_port  = UART_NUM_1,
-        .tx_pin     = GPIO_NUM_6,   // TODO(pins): confirm against your wiring
-        .rx_pin     = GPIO_NUM_7,   // TODO(pins): confirm against your wiring
+        .tx_pin     = GPIO_NUM_6,
+        .rx_pin     = GPIO_NUM_7,
         .baud_rate  = 460800
     };
 

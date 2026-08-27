@@ -1,3 +1,9 @@
+# vl53l1x_driver - ToF rangefinder. Three layers, only two of which are ours:
+#   vl53l1x_driver.c / vl53l1_platform.c  = project code
+#   st_uld/                               = ST's vendored Ultra Lite Driver, do not edit
+# This file's job is to make the vendored half OPTIONAL, so the firmware still builds and flies
+# (in angle mode, altitude loop disengaged) when ST's sources are absent.
+#
 # The ST Ultra Lite Driver sources are not redistributed in this repo. Drop them into
 # st_uld/ (see st_uld/README.md) and they get compiled in automatically; without them the
 # component still builds and vl53l1x_init() reports ESP_ERR_NOT_SUPPORTED.

@@ -1,3 +1,21 @@
+// wifi_ap.c - SoftAP bring-up and the station-count event handler.
+//
+// WHAT THIS FILE DOES
+//   wifi_event_handler()  tracks associated stations. A DISCONNECT is logged at warning level on
+//                         purpose: losing the station mid-flight is how the control link dies,
+//                         and you want to be able to find that moment in the log afterwards.
+//   wifi_ap_init()        the ordered bring-up. Idempotent.
+//
+// HOW THE BRING-UP IS ORDERED, and the two tolerated failures
+//   nvs -> netif -> event loop -> default AP netif -> wifi init -> handler -> mode/config/start
+//   -> POWER SAVE OFF -> TX POWER DOWN. Two deviations from "check everything":
+//     - esp_event_loop_create_default() returning ESP_ERR_INVALID_STATE is fine (already made).
+//     - a WPA2 password under 8 characters falls back to an OPEN network rather than refusing to
+//       start, because an unreachable drone is worse than an unsecured one. It is logged loudly.
+//     - failing to set TX power is non-fatal: a louder radio still flies, it just costs battery.
+//
+// The two settings that matter are documented at the point of use below; see also README.md.
+
 #include "wifi_ap.h"
 #include "esp_wifi.h"
 #include "esp_event.h"

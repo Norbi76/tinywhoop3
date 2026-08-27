@@ -2,6 +2,22 @@
 
 #include "esp_err.h"
 
+// http_server.h - the dashboard and the "/api/..." control surface.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Everything the pilot does - arm, fly, change mode, take a photo, tune a gain - arrives as an
+//   HTTP request here. The component holds NO state of its own: each handler translates a request
+//   into a call on control_state, camera_sd or uart_link and returns.
+//
+// HOW IT DOES ITS JOB
+//   Every write handler is a QUEUE PUSH, never the work itself. /api/capture queues a token
+//   instead of writing to the SD card; /api/gains queues a frame instead of sending it;
+//   /api/input records button state and lets the 50 Hz UART task do the integration. That
+//   pattern is the whole design - see the "must be fast" note below for why.
+//
+//   Request bodies are parsed by hand (json_flag/json_number in the .c) rather than with a JSON
+//   library, because they are three or four flat keys from a single known producer.
+//
 // Dashboard HTTP server.
 //
 // Endpoints:

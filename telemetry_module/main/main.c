@@ -1,3 +1,22 @@
+// main.c - the telemetry module's entry point. app_main() and nothing else.
+//
+// WHAT THIS FILE DOES
+//   Every subsystem lives in a component; this file's only job is to bring them up in the right
+//   ORDER and put them on the right CORE. Both are load-bearing, so both are documented below.
+//
+// HOW THE ORDER IS DECIDED
+//   Dependency first, priority second: control_state (depends on nothing) -> UART link (the thing
+//   that actually flies the drone, before Wi-Fi) -> camera/SD -> Wi-Fi AP -> gs_link (needs a
+//   netif) -> HTTP server LAST, because it is what starts accepting pilot input and everything it
+//   touches must already exist.
+//
+// FATAL vs NON-FATAL IS A DELIBERATE SPLIT
+//   Fatal:     control_state, uart_link, wifi_ap, http_server  - the pilot cannot fly without them.
+//   Non-fatal: camera_sd, gs_link                              - they only make the drone more useful.
+//   The flight controller applies the same principle to its ToF and optical flow sensors.
+//
+// Core assignment and the priority ladder are explained in the comment block below.
+
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -8,6 +27,7 @@
 #include "uart_link.h"
 #include "camera_sd.h"
 #include "http_server.h"
+#include "gs_link.h"
 
 static const char *TAG = "TELEMETRY_MODULE";
 
@@ -78,7 +98,17 @@ void app_main(void) {
         return;
     }
 
-    // --- 5. HTTP server ------------------------------------------------------
+    // --- 5. Ground station link ----------------------------------------------
+    // NON-FATAL, same reasoning as the camera: this is a tuning tool, not a flight requirement.
+    // Started after the AP so lwIP has a netif to bind to, and before the HTTP server only
+    // because the HTTP server is the thing that starts accepting pilot input.
+    error = gs_link_start();
+    if (error != ESP_OK) {
+        ESP_LOGW(TAG, "Ground station link unavailable (%s) - PID tuning over UDP is disabled",
+                 esp_err_to_name(error));
+    }
+
+    // --- 6. HTTP server ------------------------------------------------------
     // Last, because it is the thing that starts accepting pilot input, and everything it
     // touches has to exist before the first request arrives.
     error = http_server_start();

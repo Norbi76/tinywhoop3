@@ -1,3 +1,29 @@
+// nav_estimator.c - the two sensor-fusion paths behind nav_state_t.
+//
+// WHAT THIS FILE DOES
+//   nav_estimator_update_range()  ToF mm  -> altitude + climb_rate   (~33 Hz, from sensor_task)
+//   nav_estimator_update_flow()   flow counts -> velocity_x/y        (~100 Hz, from sensor_task)
+//
+// HOW EACH PATH IS STRUCTURED
+//   Both are a series of GATES followed by the arithmetic. Each gate has a specific failure it is
+//   there to prevent, documented at the gate. The pattern to notice: a gate never clears the
+//   validity flag immediately - it clears it only after 200 ms with no good sample. A single bad
+//   reading therefore does not refresh the flag but does not drop it either. Without that
+//   hysteresis the flags would chatter on ordinary sensor noise and flight_control would engage
+//   and disengage the outer loops several times a second.
+//
+//   Altitude gating cascades into velocity: converting an ANGULAR flow rate into m/s requires
+//   knowing how far away the surface is, so no altitude means no velocity, by construction.
+//
+// WHY THERE IS NO LOCKING HERE
+//   Pure arithmetic over module statics, single-writer (sensor_task). The cross-task handoff to
+//   the 1 kHz loop is done one level up in main/sensor_task.c, which copies nav_estimator_get()
+//   into a mutex-protected snapshot that fc_task reads with a zero timeout.
+//
+// TWO CONSTANTS/CONVENTIONS IN HERE ARE UNVERIFIED AND BOTH MATTER:
+//   FLOW_COUNTS_PER_RAD (a guess) and the gyro-compensation axis pairing/signs. See the TODO and
+//   the bench procedure inline below, and README.md.
+
 #include "nav_estimator.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -18,11 +44,21 @@ static const char *TAG = "NAV";
 // radians of angular displacement and is the single scale factor that sets how fast the drone
 // thinks it is moving. Everything about velocity hold depends on getting it right.
 //
-// How to measure: mount the drone on a slide or a ruler at a known fixed height (say 300 mm),
-// translate it a known distance (say 200 mm) at a steady speed, and log the accumulated
-// delta counts. Then:
-//     angle_moved_rad   = atan2(0.200, 0.300)
-//     FLOW_COUNTS_PER_RAD = accumulated_counts / angle_moved_rad
+// How to measure: ../../../flow_calibration/ is a bench tool that does exactly this on a spare
+// ESP32-S3. Mount the sensor at a known fixed height h, translate it a known distance D at a
+// steady speed, and log the accumulated delta counts. Then:
+//
+//     FLOW_COUNTS_PER_RAD = accumulated_counts * h / D
+//
+// NOTE: an earlier version of this comment said angle_moved_rad = atan2(D, h), which is WRONG.
+// The sensor accumulates frame-to-frame image shifts, so the total over the slide is the
+// integral of (v/h)dt = D/h. atan(D/h) is the angle subtended at the END position, which is not
+// what accumulates. It is also what the arithmetic below requires: velocity = (counts/K)/dt * h
+// only recovers the true D/dt when counts/K == D/h - i.e. the "rad" here is really tangent
+// units (pixel displacement), which is the pinhole relation. With the old comment's own numbers
+// (D=200, h=300) atan gives 0.588 against the correct 0.667, so K came out 13% high and
+// estimated velocity 13% low. Keep D/h <= ~0.3 and the two forms agree to about 1% anyway.
+//
 // Repeat on both axes. The published figure for the PMW3901's ~42 degree field of view over
 // 30x30 pixels lands somewhere near 500, but that is a starting point for a sanity check,
 // not a substitute for measuring your own unit.

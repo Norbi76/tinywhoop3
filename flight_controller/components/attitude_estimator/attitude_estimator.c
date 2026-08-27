@@ -1,3 +1,29 @@
+// attitude_estimator.c - the complementary filter itself.
+//
+// WHAT THIS FILE DOES
+//   One function does the real work: attitude_update(), called at 1 kHz from fc_task right after
+//   the IMU read. Everything else is state management.
+//
+// HOW attitude_update() WORKS, in order
+//   1. Copy the gyro rates into the body axes.  <-- THE UNVERIFIED AXIS MAPPING LIVES HERE
+//   2. Integrate the rates to get a gyro-only roll/pitch prediction, and integrate yaw outright
+//      (yaw has no correction source at all - no magnetometer on this airframe).
+//   3. Gate the accelerometer on total magnitude. Outside 0.8..1.2 g it is not measuring gravity,
+//      so the sample is dropped and the filter coasts on step 2 alone.
+//   4. Before `initialized`: seed roll/pitch straight FROM the accelerometer rather than fusing,
+//      so the filter does not have to creep in from zero over its own time constant while the
+//      pilot is waiting to arm.
+//   5. After `initialized`: blend prediction and measurement with alpha = tau/(tau+dt).
+//
+// WHY THERE IS NO LOCKING
+//   All state is module-static and fc_task is the only writer. telemetry_task does call
+//   attitude_get() for the status frame, and that copy is not atomic - a status frame can mix
+//   fields from two consecutive ticks. Harmless for a 50 Hz display; would NOT be acceptable if a
+//   control path ever read this cross-task.
+//
+// dt IS PASSED IN, not assumed. Loop jitter is then absorbed correctly instead of being
+// integrated as an angle error.
+
 #include "attitude_estimator.h"
 #include "esp_log.h"
 #include <math.h>

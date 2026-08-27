@@ -1,3 +1,28 @@
+// telemetry_uart.c - framing, CRC and UART I/O for the protocol declared in telemetry_uart.h.
+//
+// WHAT THIS FILE DOES
+//   Turns a (msg_type, payload) pair into bytes on the wire and back again. Four jobs:
+//     1. telemetry_calculate_crc16()          - CRC-16/CCITT-FALSE over header+payload.
+//     2. uart_telemetry_init()                - configure the port and install the IDF driver.
+//     3. uart_telemetry_send_message()        - build header, CRC, tail; write all three.
+//     4. the two readers                      - parse one frame out of the RX stream.
+//
+// HOW IT DOES IT
+//   Send and receive both stage the header and payload into a contiguous crc_buffer before
+//   hashing, because the CRC covers the two together but they are separate writes on the wire.
+//   The frame is written in three uart_write_bytes() calls rather than one - the IDF driver's TX
+//   ring buffer coalesces them, so this costs nothing and avoids a second full-frame copy.
+//
+//   The two readers differ ONLY in their failure handling, and that difference is the whole point
+//   of having both. See the comment above each one.
+//
+// CONCURRENCY - IMPORTANT
+//   active_uart_num and sequence_counter are module-globals with no locking. That makes this
+//   component single-port and single-sender by construction: exactly one UART per firmware image,
+//   and all uart_telemetry_send_message() calls must come from one task. Both firmwares comply
+//   today (FC: telemetry_task only; TM: the UART TX task only). Adding a second sending task would
+//   race the sequence counter and interleave frames on the wire.
+
 #include "telemetry_uart.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
@@ -11,6 +36,11 @@
 static uart_port_t active_uart_num; 
 static uint16_t sequence_counter;
 
+// CRC-16/CCITT-FALSE, computed bitwise rather than from a table.
+//   init 0xFFFF, polynomial 0x1021, MSB-first, no input/output reflection, no final XOR.
+// A table would be ~8x faster but costs 512 bytes of .rodata; at 50 Hz over a <=69 byte frame the
+// bitwise loop is a few microseconds and never shows up in the profile.
+// tools/ground_station/protocol.py reimplements this exactly - change one and you must change both.
 uint16_t telemetry_calculate_crc16(const uint8_t *data, size_t length) {
     uint16_t crc = 0xFFFF;
 
@@ -59,6 +89,16 @@ esp_err_t uart_telemetry_init(const telemetry_uart_config_t *config) {
     return ESP_OK;
 }
 
+// Strict reader: assumes the next byte in the stream is the start of a frame.
+//
+// On any validation failure it calls uart_flush_input(), which discards the ENTIRE RX buffer -
+// including good frames already queued behind the bad byte. That is a deliberate "start clean"
+// strategy and it is fine for bursty request/response traffic, but on this airframe's steady
+// 50 Hz stream it turns one corrupted byte into several lost frames, which is a meaningful
+// fraction of the flight controller's 300 ms link watchdog.
+//
+// Both firmwares therefore use uart_telemetry_read_message_resync() below instead. This function
+// is kept because it is the simpler primitive and is still correct on a quiet link.
 bool uart_telemetry_read_message(telemetry_message_t *out_message) {
     telemetry_frame_header_t header;
 
@@ -127,6 +167,17 @@ bool uart_telemetry_read_message(telemetry_message_t *out_message) {
     return true;
 }
 
+// Resynchronising reader: makes no assumption about where in the stream it starts.
+//
+// Every failure path here is a `continue`, never a flush. The loop hunts for the next 0xAA and
+// tries again from there, so a corrupted frame costs exactly that frame and the good ones behind
+// it survive. The esp_timer deadline bounds total blocking time so a 50 Hz caller keeps its
+// cadence even on a completely dead or noise-only link.
+//
+// Note the deliberate consequence: a 0xAA that happens to appear inside a payload will be tried
+// as a frame start and rejected a few bytes later (bad length, bad end byte, or bad CRC). That
+// costs one extra scan, which is why there is no escaping/stuffing scheme - the CRC is what
+// actually decides frame validity, the start byte is only a hint about where to look.
 bool uart_telemetry_read_message_resync(telemetry_message_t *out_message, uint32_t timeout_ms) {
     if (out_message == NULL) {
         return false;

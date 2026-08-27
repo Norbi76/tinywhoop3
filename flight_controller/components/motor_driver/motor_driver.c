@@ -1,3 +1,23 @@
+// motor_driver.c - LEDC setup and thrust->duty output for the four brushed motors.
+//
+// WHAT THIS FILE DOES
+//   Configures one LEDC timer and four channels at boot, then provides the write paths the
+//   control loop and the safety paths use:
+//     motor_set_thrust_all()  - the 1 kHz hot path, called by the mixer
+//     motor_all_stop()        - disarm / kill / link-watchdog path
+//     motor_set_raw_duty()    - bench only, bypasses the thrust curve
+//
+// HOW IT DOES IT
+//   Two parallel const tables (motor_gpio[] and motor_channel[]) index by the MOTOR_* defines, so
+//   the mixer's motor ordering is the array ordering everywhere with no translation step.
+//   motor_write_duty() is the single choke point through which every duty change passes; it is
+//   also where last_duty[] is latched for telemetry.
+//
+//   All state is two module statics (driver_initialized, last_duty[]) with no locking. last_duty[]
+//   is written by fc_task and read by telemetry_task, which is safe here because each element is
+//   an aligned uint32_t - the reader can see a one-tick-stale value but never a torn one.
+//
+
 #include "motor_driver.h"
 #include "driver/ledc.h"
 #include "esp_log.h"
@@ -6,8 +26,7 @@
 static const char *TAG = "MOTOR";
 
 // ---------------------------------------------------------------------------
-// TODO(pins): CONFIRM AGAINST YOUR WIRING before the first powered test.
-// These are placeholders. On the ESP32-S3 any GPIO can drive LEDC, but avoid the strapping
+// On the ESP32-S3 any GPIO can drive LEDC, but avoid the strapping
 // pins (0, 3, 45, 46) and the USB-JTAG pins (19, 20) for motor gates - a strapping pin held
 // high or low at boot by a gate pull-down will change the boot mode.
 // GPIO 11 and 12 are already taken by the IMU I2C bus (see imu_driver.c).
@@ -16,15 +35,6 @@ static const char *TAG = "MOTOR";
 #define MOTOR_FRONT_RIGHT_GPIO 5
 #define MOTOR_REAR_LEFT_GPIO   1
 #define MOTOR_REAR_RIGHT_GPIO  2
-
-// ---------------------------------------------------------------------------
-// TODO(hardware): GATE PULL-DOWNS - VERIFY BEFORE FITTING PROPS.
-// Between reset and motor_driver_init() completing, these GPIOs float. A floating MOSFET
-// gate can drift above threshold and spin a motor while you are holding the drone.
-// Each gate needs a physical pull-down resistor (~10k to GND) on the PCB. Confirm they are
-// fitted and measure the gate voltage during a reboot with a scope before trusting this.
-// Software cannot fix a floating gate - do not rely on the init sequence below for safety.
-// ---------------------------------------------------------------------------
 
 #define MOTOR_LEDC_TIMER      LEDC_TIMER_0
 #define MOTOR_LEDC_MODE       LEDC_LOW_SPEED_MODE
@@ -79,6 +89,11 @@ static esp_err_t motor_write_duty(int motor_index, uint32_t duty) {
     return ESP_OK;
 }
 
+// Brings up the timer and all four channels with duty 0, then stops everything again.
+//
+// This is the FIRST call in app_main(), before any task exists that could command thrust. The
+// channels are configured with .duty = 0 rather than configured-then-zeroed so that the gate is
+// driven low by the very first hardware write, not one call later.
 esp_err_t motor_driver_init(void) {
     if (driver_initialized) {
         return ESP_OK;

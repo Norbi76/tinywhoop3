@@ -6,6 +6,29 @@
 #include "nav_estimator.h"
 #include "telemetry_uart.h"
 
+// flight_control.h - the orchestrator. Everything else on this board feeds it or is driven by it.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Owns the eight PID instances, decides when the motors are allowed to run at all, converts
+//   three axis commands into four motor thrusts, and disarms the aircraft when the pilot's link
+//   goes away. flight_control_update() is the only thing that writes the motors in normal
+//   operation.
+//
+// HOW IT DOES ITS JOB
+//   Three nested loops (below) clocked by DIVIDER COUNTERS off one 1 kHz tick rather than by
+//   separate tasks - so they can never drift in phase against each other, and the whole cascade
+//   is one call stack with no synchronisation inside it. Around that sit the arming state
+//   machine (kill / link watchdog / four-condition arming gate) and the X-quad mixer.
+//
+// THE SAFETY INVARIANT
+//   Every path that does not EXPLICITLY authorise the motors ends at motor_all_stop(). That is
+//   structured as a single early return in flight_control_update() rather than as conditionals
+//   scattered through the cascade, so "disarmed means stopped" is auditable by reading one
+//   function.
+//
+// The mixer signs and two constants in flight_control.c are unverified on hardware and the drone
+// can flip on the first flight if they are wrong. See README.md before flying.
+//
 // Flight control orchestrator: the cascade, the mixer, the arming state machine and the
 // control-link watchdog.
 //

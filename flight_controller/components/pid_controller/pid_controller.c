@@ -1,3 +1,23 @@
+// pid_controller.c - the control law.
+//
+// WHAT THIS FILE DOES
+//   pid_init()       validates arguments, zeroes the struct, and derives the derivative filter
+//                    coefficient d_alpha from the requested cutoff and the nominal loop period.
+//   pid_update()     one iteration: P, then filtered derivative-on-measurement, then integral
+//                    with conditional-integration anti-windup, then clamp. Also records the
+//                    telemetry fields pid_registry publishes.
+//   pid_reset()      clears integrator + derivative history, keeps gains.  (arm/disarm path)
+//   pid_set_gains()  changes gains, keeps the integrator.                  (live tuning path)
+//
+// READING pid_update()
+//   The order is not arbitrary. P and D are computed FIRST because the anti-windup test needs
+//   the full candidate output - it has to know what the sum would be before deciding whether
+//   committing this integration step would push further into saturation. Each of the four
+//   non-obvious choices is explained at the point where it happens.
+//
+// NO STATE LIVES IN THIS FILE. Every instance is entirely contained in the caller's struct, so
+// there is nothing to lock and nothing shared between the eight instances.
+
 #include "pid_controller.h"
 #include "esp_log.h"
 #include <math.h>
@@ -49,6 +69,8 @@ esp_err_t pid_init(pid_controller_t *pid,
     // alpha near 1 means almost no filtering, alpha near 0 means very heavy filtering.
     const float rc = 1.0f / (2.0f * (float)M_PI * d_cutoff_hz);
     pid->d_alpha = nominal_dt / (rc + nominal_dt);
+    pid->d_cutoff_hz = d_cutoff_hz;
+    pid->nominal_dt = nominal_dt;
 
     pid->first_update = true;
 
@@ -95,16 +117,32 @@ float pid_update(pid_controller_t *pid, float setpoint, float measurement, float
         freeze_integrator = true;
     }
 
+    bool hit_integrator_limit = false;
     if (!freeze_integrator) {
-        pid->integrator = clampf(candidate_integrator, -pid->integrator_limit, pid->integrator_limit);
+        const float clamped_integrator =
+            clampf(candidate_integrator, -pid->integrator_limit, pid->integrator_limit);
+        hit_integrator_limit = (clamped_integrator != candidate_integrator);
+        pid->integrator = clamped_integrator;
     }
 
     // --- Output ---------------------------------------------------------
+    const float raw_output = p_term + pid->integrator + d_term;
+    const float output = clampf(raw_output, pid->out_min, pid->out_max);
+
     pid->last_p = p_term;
     pid->last_i = pid->integrator;
     pid->last_d = d_term;
 
-    return clampf(p_term + pid->integrator + d_term, pid->out_min, pid->out_max);
+    // Telemetry only, see pid_controller_t. Recording the two saturation conditions here is the
+    // only place they are observable - both are computed above and would otherwise be discarded,
+    // and "why is this loop not responding" is almost always one of them.
+    pid->last_setpoint = setpoint;
+    pid->last_measurement = measurement;
+    pid->last_output = output;
+    pid->out_saturated = (output != raw_output);
+    pid->integrator_clamped = freeze_integrator || hit_integrator_limit;
+
+    return output;
 }
 
 void pid_reset(pid_controller_t *pid) {
@@ -119,6 +157,11 @@ void pid_reset(pid_controller_t *pid) {
     pid->last_p = 0.0f;
     pid->last_i = 0.0f;
     pid->last_d = 0.0f;
+    pid->last_setpoint = 0.0f;
+    pid->last_measurement = 0.0f;
+    pid->last_output = 0.0f;
+    pid->out_saturated = false;
+    pid->integrator_clamped = false;
 }
 
 void pid_set_gains(pid_controller_t *pid, float kp, float ki, float kd) {

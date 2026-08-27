@@ -1,3 +1,22 @@
+// telemetry_uart.h - the wire contract between the flight controller and the telemetry module.
+//
+// WHAT THIS FILE IS FOR
+//   This header IS the protocol. Everything the two boards agree on lives here: the frame layout,
+//   the message type numbers, the packed payload structs, the flag bits and the two PID loop-id
+//   enums. Both firmware projects compile against this one copy of the file (pulled in via
+//   EXTRA_COMPONENT_DIRS, not vendored), so a change here changes both sides at once - which is
+//   exactly why it is safe, and exactly why it must never be edited with only one side in mind.
+//
+// HOW IT KEEPS THE TWO SIDES HONEST
+//   The payload structs are __attribute__((packed)) and are memcpy'd straight into and out of the
+//   frame buffer - there is no serialisation step that could paper over a layout difference. The
+//   _Static_assert block at the bottom of the file is the enforcement mechanism: it fails the
+//   BUILD when a payload grows past the frame size, or when one of the PID payloads changes size
+//   at all (the Python ground station unpacks those with hardcoded struct formats).
+//
+// See README.md in this directory for the frame diagram, the message table, and why there are two
+// different loop-id enums for the same eight PID instances.
+
 #pragma once
 
 #include <stdint.h>
@@ -21,6 +40,14 @@ typedef enum {
     TELEMETRY_MSG_ARMING = 11,
     TELEMETRY_MSG_MODE = 12,
     TELEMETRY_MSG_GAINS = 13,
+
+    // --- PID tuning link (flight controller <-> Python ground station) -------
+    // These ride the same UART as everything else, but the telemetry module does not interpret
+    // them: it forwards them verbatim between the UART and the UDP ground-station link.
+    TELEMETRY_MSG_PID_DEBUG = 20,   // FC -> GS, high rate
+    TELEMETRY_MSG_PID_GAINS = 21,   // both directions
+    TELEMETRY_MSG_PID_SELECT = 22,  // GS -> FC
+    TELEMETRY_MSG_PID_INJECT = 23,  // GS -> FC
 } telemetry_msg_type_t;
 
 // Flight modes, carried in telemetry_control_payload_t.flight_mode and echoed back in the status frame.
@@ -68,8 +95,10 @@ typedef struct {
 
 //Represents a complete telemetry message frame, including the header, payload, and tail.
 // [header: start_byte(1) | msg_type(1) | payload_len(1) | seq(2)]      5 bytes
-// [payload: 0-48 bytes, length given by payload_len]                0-48 bytes
+// [payload: 0-64 bytes, length given by payload_len]                0-64 bytes
 // [tail: crc16(2) | end_byte(1)]                                       3 bytes
+// The payload bound is TELEMETRY_MAX_PAYLOAD_SIZE (64). Note the PID payloads are additionally
+// asserted against the tighter TELEMETRY_PID_PAYLOAD_CEILING (48) - see the assert block below.
 typedef struct {
     telemetry_frame_header_t header;
     uint8_t payload[TELEMETRY_MAX_PAYLOAD_SIZE];
@@ -151,6 +180,97 @@ typedef struct {
     float kd;
 } __attribute__((packed)) telemetry_gains_payload_t;
 
+// ---------------------------------------------------------------------------
+// PID TUNING LINK
+//
+// A second, independent addressing of the same 8 PID instances, used by the Python ground
+// station. It exists alongside telemetry_loop_id_t rather than replacing it because the two
+// orderings differ and the web dashboard's loop ids are baked into index.html - renumbering
+// telemetry_loop_id_t would silently retune the wrong axis from the browser.
+//
+// pid_registry_bind() on the flight controller is what reconciles the two: each PID instance is
+// bound to its pid_loop_id_t while still living at its telemetry_loop_id_t index.
+// ---------------------------------------------------------------------------
+
+// Ground-station loop ids. Ordered outer-to-inner, which is the order the tuning UI enumerates.
+typedef enum {
+    PID_LOOP_ALT = 0,         // m/s in    -> throttle out,  50 Hz
+    PID_LOOP_VEL_X = 1,       // m/s in    -> deg out,       50 Hz
+    PID_LOOP_VEL_Y = 2,       // m/s in    -> deg out,       50 Hz
+    PID_LOOP_ANG_ROLL = 3,    // deg in    -> deg/s out,    250 Hz
+    PID_LOOP_ANG_PITCH = 4,   // deg in    -> deg/s out,    250 Hz
+    PID_LOOP_RATE_ROLL = 5,   // deg/s in  -> cmd out,     1000 Hz
+    PID_LOOP_RATE_PITCH = 6,  // deg/s in  -> cmd out,     1000 Hz
+    PID_LOOP_RATE_YAW = 7,    // deg/s in  -> cmd out,     1000 Hz
+    PID_LOOP_COUNT = 8,
+} pid_loop_id_t;
+
+// Wildcard loop id for telemetry_pid_select_payload_t: stream every loop at once.
+// 0xFF rather than PID_LOOP_COUNT so that a future ninth loop cannot collide with it.
+#define PID_LOOP_ALL 0xFF
+
+// Bit flags for telemetry_pid_debug_payload_t.flags.
+#define PID_FLAG_I_CLAMPED  (1u << 0) // integrator hit its limit or was frozen by anti-windup
+#define PID_FLAG_OUT_SAT    (1u << 1) // output was clipped by the saturation limits
+#define PID_FLAG_MEAS_STALE (1u << 2) // measurement is older than one loop period
+
+// Every PID payload must also fit inside this tighter ceiling. TELEMETRY_MAX_PAYLOAD_SIZE was
+// raised to 64 for the status frame, but the ground station's struct formats are hardcoded
+// against 48 - keeping the assert at 48 means the Python side cannot silently fall behind.
+#define TELEMETRY_PID_PAYLOAD_CEILING 48
+
+// One sample of a single PID loop's internals (flight controller -> ground station).
+// Emitted from inside the control task at up to the loop's own rate, so it is deliberately the
+// smallest thing that still lets the whole loop be reconstructed offline.
+//
+// The error is NOT transmitted: it is exactly setpoint - measurement, and at 500 Hz those four
+// bytes are a fifth of the link budget for something the receiver can compute itself.
+typedef struct {
+    uint32_t t_us;        // esp_timer_get_time() truncated to 32 bit - wraps every ~71 minutes
+    uint8_t loop_id;      // pid_loop_id_t
+    uint8_t flags;        // PID_FLAG_*
+    float setpoint;       // in the loop's setpoint units, injection offset included
+    float measurement;
+    float p_term;
+    float i_term;         // the ki-SCALED integrator, not the raw error integral
+    float d_term;
+    float output;         // post-clamp, i.e. what the next stage actually received
+} __attribute__((packed)) telemetry_pid_debug_payload_t;
+
+// Full gain set for one loop. Travels in BOTH directions: the ground station sends it to set
+// gains, and the flight controller sends the same struct back to report them.
+//
+// A message whose six float fields are all exactly zero is a READ REQUEST, not a set. An
+// all-zero gain set would disable the loop entirely and is never something anyone means, so the
+// overload is safe and saves a message type.
+typedef struct {
+    uint8_t loop_id;      // pid_loop_id_t
+    float kp;
+    float ki;
+    float kd;
+    float i_limit;        // symmetric integrator clamp
+    float out_limit;      // symmetric output clamp, applied as out_min = -x, out_max = +x
+    float d_cutoff_hz;    // derivative low-pass corner
+} __attribute__((packed)) telemetry_pid_gains_payload_t;
+
+// Subscribes the debug stream to one loop (ground station -> flight controller).
+// Only one selection is active at a time: the UART cannot carry eight loops at full rate.
+typedef struct {
+    uint8_t loop_id;      // pid_loop_id_t, or PID_LOOP_ALL to stream every loop
+    uint8_t divider;      // emit 1 sample per N loop ticks; 0 is treated as 1
+    uint16_t reserved;
+} __attribute__((packed)) telemetry_pid_select_payload_t;
+
+// Test-signal injection (ground station -> flight controller).
+// Adds a perturbation to one loop's setpoint so its step response can be measured in flight,
+// which is what the overshoot and settling-time readouts on the ground station are computed from.
+typedef struct {
+    uint8_t loop_id;      // pid_loop_id_t
+    uint8_t mode;         // 0 off, 1 step, 2 doublet, 3 square
+    float amplitude;      // in the loop's setpoint units
+    float period_s;
+} __attribute__((packed)) telemetry_pid_inject_payload_t;
+
 // Compile-time guard: every payload must fit inside one frame.
 // Without these, adding a field to a payload struct would silently overflow
 // telemetry_message_t.payload and corrupt the frame tail at runtime, which presents as
@@ -165,6 +285,29 @@ _Static_assert(sizeof(telemetry_status_payload_t) <= TELEMETRY_MAX_PAYLOAD_SIZE,
                "Status payload does not fit in a telemetry frame");
 _Static_assert(sizeof(telemetry_gains_payload_t) <= TELEMETRY_MAX_PAYLOAD_SIZE,
                "Gains payload does not fit in a telemetry frame");
+
+// The PID payloads get EXACT size asserts on top of the fits-in-a-frame check, because the
+// ground station unpacks them with hardcoded struct formats ("<IBB6f" and friends). A padding
+// byte introduced by a compiler or an added field would still fit the frame and would still
+// build - it would just shift every float in the plot by one byte and produce garbage that
+// looks like noise rather than like a bug. Fail the build instead.
+_Static_assert(sizeof(telemetry_pid_debug_payload_t) == 30,
+               "PID debug payload must be exactly 30 bytes - the ground station unpacks '<IBB6f'");
+_Static_assert(sizeof(telemetry_pid_gains_payload_t) == 25,
+               "PID gains payload must be exactly 25 bytes - the ground station unpacks '<B6f'");
+_Static_assert(sizeof(telemetry_pid_select_payload_t) == 4,
+               "PID select payload must be exactly 4 bytes - the ground station unpacks '<BBH'");
+_Static_assert(sizeof(telemetry_pid_inject_payload_t) == 10,
+               "PID inject payload must be exactly 10 bytes - the ground station unpacks '<BBff'");
+
+_Static_assert(sizeof(telemetry_pid_debug_payload_t) <= TELEMETRY_PID_PAYLOAD_CEILING,
+               "PID debug payload does not fit in a telemetry frame");
+_Static_assert(sizeof(telemetry_pid_gains_payload_t) <= TELEMETRY_PID_PAYLOAD_CEILING,
+               "PID gains payload does not fit in a telemetry frame");
+_Static_assert(sizeof(telemetry_pid_select_payload_t) <= TELEMETRY_PID_PAYLOAD_CEILING,
+               "PID select payload does not fit in a telemetry frame");
+_Static_assert(sizeof(telemetry_pid_inject_payload_t) <= TELEMETRY_PID_PAYLOAD_CEILING,
+               "PID inject payload does not fit in a telemetry frame");
 
 // Uart initialization function.
 // Sets up the UART interface with the specified configuration parameter.

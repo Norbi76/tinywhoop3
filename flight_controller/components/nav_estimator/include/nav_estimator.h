@@ -5,6 +5,26 @@
 #include "vl53l1x_driver.h"
 #include "pmw3901_driver.h"
 
+// nav_estimator.h - "where am I": altitude and body-frame velocity for the outer control loop.
+//
+// WHAT THIS COMPONENT IS FOR
+//   The only source of position information on this aircraft - there is no GPS, no barometer and
+//   no magnetometer. It takes raw millimetres from the ToF and raw counts from the optical flow
+//   sensor and produces altitude, climb rate, and forward/right velocity.
+//
+// HOW IT DOES IT
+//   Altitude: slant range * cos(roll) * cos(pitch), gated on sensor status, tilt and plausible
+//   height, with the climb rate differentiated from it and heavily low-passed.
+//   Velocity:  flow counts -> radians -> subtract the rotation the gyro saw over the same
+//   interval (the sensor cannot tell "flying forward" from "pitching down") -> multiply by
+//   altitude to turn an angular rate into m/s.
+//
+// THE VALIDITY FLAGS ARE THE MOST IMPORTANT PART OF THIS HEADER.
+//   Read the comment on the struct below. Both flags go false during NORMAL flight with HEALTHY
+//   hardware, and callers that ignore them will fly on numbers that are simply wrong.
+//
+// Two scale/sign conventions here are unmeasured guesses - see README.md and nav_estimator.c.
+//
 // Navigation estimator: turns raw ToF range and optical flow counts into altitude and
 // body-frame velocity that the outer control loops can use.
 //

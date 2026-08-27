@@ -1,3 +1,27 @@
+// sensor_task.c - the 100 Hz navigation task and the nav_state_t handoff to the control loop.
+//
+// WHAT THIS FILE DOES
+//   Polls the two slow navigation sensors, feeds nav_estimator, and publishes the result behind
+//   a mutex that fc_task samples with a zero timeout.
+//
+// HOW THE CADENCE IS CHOSEN
+//   Task runs at 100 Hz. Optical flow is read every cycle; the ToF only every 3rd (~33 Hz),
+//   because it is configured for a 25 ms inter-measurement period and polling faster would just
+//   return "not ready" while occupying an I2C bus the 1 kHz IMU loop is also using.
+//
+// THE NULL CONVENTION
+//   A failed sensor read still calls nav_estimator_update_*(), with NULL. That is how the
+//   estimator is told "no data this cycle" so it can run its own 200 ms timeout and eventually
+//   drop the validity flag - rather than silently freezing the last good altitude forever.
+//
+// THE MUTEX ASYMMETRY IS THE DESIGN
+//   Writer (this task, 100 Hz) takes it with a 2 ms timeout and skips a publish if busy.
+//   Reader (fc_task, 1 kHz) takes it with a ZERO timeout and keeps its previous copy if busy.
+//   The 1 kHz side must never wait; the 100 Hz side can afford 2 ms out of its 10 ms budget.
+//
+// NEITHER SENSOR IS REQUIRED FOR FLIGHT - sensor_task_init() warns and continues on either
+// failure, and only returns an error if the MUTEX could not be created.
+
 #include "sensor_task.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"

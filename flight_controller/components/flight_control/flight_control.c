@@ -1,5 +1,41 @@
+// flight_control.c - the cascade, the mixer, the arming machine and the link watchdog.
+//
+// LAYOUT OF THIS FILE, in order
+//   1. Loop rates and dividers          - how 1 kHz becomes 250 Hz and 50 Hz
+//   2. Safety constants                 - link timeout, arming threshold, idle floor
+//   3. Default PID gains                - all starting points, all live-tunable
+//   4. Module state                     - the eight PIDs, arming state, inter-loop setpoints
+//   5. pid_loop_to_telemetry[]          - the ONLY place the two loop-id orderings meet
+//   6. flight_control_run_pid()         - every PID call in the cascade goes through this
+//   7. flight_control_mix()             - the X-quad mixer and its three-step throttle placement
+//   8. flight_control_update_arming()   - kill latch, watchdog, four-condition arming gate
+//   9. outer / mid / inner loop bodies
+//  10. flight_control_update()          - the 1 kHz entry point that drives 6-9
+//  11. status assembly and the gain setters
+//
+// HOW THE PIECES FIT
+//   flight_control_update() is called at 1 kHz and does everything in one call stack: snapshot
+//   the control frame, evaluate arming, then run whichever loops this tick is due for. The
+//   dividers are tested BEFORE tick_counter is incremented, so tick 0 after arming runs all
+//   three - otherwise the mixer would spin up on a throttle_command the pilot never set.
+//
+//   Setpoints flow downward through module statics (outer writes angle_setpoint_*, mid writes
+//   rate_setpoint_*, inner consumes them). That is safe precisely because all three run in the
+//   same task on the same tick - there is no cross-task handoff anywhere inside the cascade.
+//
+// WHAT MAY AND MAY NOT BLOCK
+//   Nothing in this file blocks. The only cross-task entry point is
+//   flight_control_set_control_input(), which runs on core 0 while the cascade runs on core 1 and
+//   is protected by a portMUX spinlock - a torn read there would mean acting on half of one frame
+//   and half of another (new throttle, old kill flag). The single log in the inner loop is
+//   rate-limited to once a second so a failing motor write cannot flood at 1 kHz.
+//
+// BEFORE FLYING: the mixer signs, MOTOR_IDLE_THRUST and HOVER_THROTTLE are all unverified. Each
+// is marked at its definition and the bench procedures are in README.md.
+
 #include "flight_control.h"
 #include "pid_controller.h"
+#include "pid_registry.h"
 #include "motor_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -153,6 +189,42 @@ static float clampf(float value, float min, float max) {
     return value;
 }
 
+// ---------------------------------------------------------------------------
+// GROUND-STATION LOOP IDS
+//
+// pid_loop_id_t (the tuning link's ordering, outer-to-inner) and telemetry_loop_id_t (the web
+// dashboard's ordering, inner-to-outer) address the same 8 controllers in different orders.
+// pid_loops[] is indexed by the latter, so this table is the single point where the two meet.
+// Nothing else in the file needs to know both orderings exist.
+// ---------------------------------------------------------------------------
+static const telemetry_loop_id_t pid_loop_to_telemetry[PID_LOOP_COUNT] = {
+    [PID_LOOP_ALT]        = TELEMETRY_LOOP_ALTITUDE,
+    [PID_LOOP_VEL_X]      = TELEMETRY_LOOP_VEL_X,
+    [PID_LOOP_VEL_Y]      = TELEMETRY_LOOP_VEL_Y,
+    [PID_LOOP_ANG_ROLL]   = TELEMETRY_LOOP_ANGLE_ROLL,
+    [PID_LOOP_ANG_PITCH]  = TELEMETRY_LOOP_ANGLE_PITCH,
+    [PID_LOOP_RATE_ROLL]  = TELEMETRY_LOOP_RATE_ROLL,
+    [PID_LOOP_RATE_PITCH] = TELEMETRY_LOOP_RATE_PITCH,
+    [PID_LOOP_RATE_YAW]   = TELEMETRY_LOOP_RATE_YAW,
+};
+
+// Runs one PID iteration with the tuning link attached: adds any test-signal offset to the
+// setpoint on the way in, and publishes the controller's internals on the way out.
+//
+// Both registry calls are non-blocking by construction - no lock, no UART, no logging - which is
+// what makes this safe to use from the 1 kHz inner loop as well as the slower ones.
+static float flight_control_run_pid(pid_loop_id_t id,
+                                    float setpoint, float measurement,
+                                    float dt, float now_s) {
+    pid_controller_t *pid = &pid_loops[pid_loop_to_telemetry[id]];
+
+    const float injected_setpoint = setpoint + pid_registry_inject_offset(id, now_s);
+    const float output = pid_update(pid, injected_setpoint, measurement, dt);
+    pid_registry_publish(id, pid);
+
+    return output;
+}
+
 // Clears every integrator and derivative history in the cascade.
 // Called on BOTH arm and disarm. On disarm because whatever the integrators wound up to while
 // the drone was being wrestled to the ground is meaningless; on arm because time may have
@@ -171,6 +243,11 @@ static void flight_control_reset_all_pids(void) {
     altitude_hold_engaged = false;
 }
 
+// Creates all eight PID instances and hands them to the tuning registry.
+//
+// Each group gets output limits in the UNITS OF THE STAGE BELOW IT, which is what makes the
+// cascade's authority limits self-documenting: the angle loop's output clamp is a rate in deg/s,
+// the velocity loop's is an angle in degrees, the altitude loop's is a throttle delta.
 esp_err_t flight_control_init(void) {
     esp_err_t error;
 
@@ -224,6 +301,14 @@ esp_err_t flight_control_init(void) {
                      OUTER_LOOP_DT);
     if (error != ESP_OK) {
         return error;
+    }
+
+    // --- Tuning link ---------------------------------------------------------
+    // Registered after pid_init so the registry never sees a half-configured controller. The
+    // registry only stores pointers; the instances stay owned by this file.
+    pid_registry_init();
+    for (int i = 0; i < PID_LOOP_COUNT; i++) {
+        pid_registry_bind((pid_loop_id_t)i, &pid_loops[pid_loop_to_telemetry[i]]);
     }
 
     flight_state = FLIGHT_STATE_DISARMED;
@@ -442,7 +527,8 @@ static bool flight_control_update_arming(const telemetry_control_payload_t *cont
 
 // Outer loop at 50 Hz: altitude -> throttle, body velocity -> angle setpoints.
 static void flight_control_outer_loop(const telemetry_control_payload_t *control,
-                                      const nav_state_t *nav) {
+                                      const nav_state_t *nav,
+                                      float now_s) {
     const bool wants_altitude_hold = (control->flight_mode == TELEMETRY_MODE_ALT_HOLD ||
                                       control->flight_mode == TELEMETRY_MODE_POS_HOLD ||
                                       (control->flags & TELEMETRY_CTRL_FLAG_HOLD) != 0);
@@ -471,8 +557,9 @@ static void flight_control_outer_loop(const telemetry_control_payload_t *control
             altitude_setpoint = clampf(altitude_setpoint, 0.05f, 1.20f);
         }
 
-        const float adjustment = pid_update(&pid_loops[TELEMETRY_LOOP_ALTITUDE],
-                                            altitude_setpoint, nav->altitude, OUTER_LOOP_DT);
+        const float adjustment = flight_control_run_pid(PID_LOOP_ALT,
+                                                        altitude_setpoint, nav->altitude,
+                                                        OUTER_LOOP_DT, now_s);
         throttle_command = clampf(HOVER_THROTTLE + adjustment, 0.0f, 1.0f);
     } else {
         if (altitude_hold_engaged) {
@@ -495,11 +582,13 @@ static void flight_control_outer_loop(const telemetry_control_payload_t *control
         // moves the drone BACKWARD, hence the negation.
         // SIGN NEEDS BENCH VERIFICATION - if the drone runs away instead of holding station,
         // this is the first thing to flip.
-        angle_setpoint_pitch = -pid_update(&pid_loops[TELEMETRY_LOOP_VEL_X],
-                                           velocity_setpoint_x, nav->velocity_x, OUTER_LOOP_DT);
+        angle_setpoint_pitch = -flight_control_run_pid(PID_LOOP_VEL_X,
+                                                       velocity_setpoint_x, nav->velocity_x,
+                                                       OUTER_LOOP_DT, now_s);
         // Right velocity error is corrected by rolling right, so no negation here.
-        angle_setpoint_roll = pid_update(&pid_loops[TELEMETRY_LOOP_VEL_Y],
-                                         velocity_setpoint_y, nav->velocity_y, OUTER_LOOP_DT);
+        angle_setpoint_roll = flight_control_run_pid(PID_LOOP_VEL_Y,
+                                                     velocity_setpoint_y, nav->velocity_y,
+                                                     OUTER_LOOP_DT, now_s);
     } else {
         // Angle mode: the sticks are the angle setpoints directly.
         angle_setpoint_roll = control->roll_setpoint;
@@ -512,11 +601,14 @@ static void flight_control_outer_loop(const telemetry_control_payload_t *control
 
 // Mid loop at 250 Hz: angle error -> rate setpoints.
 static void flight_control_mid_loop(const telemetry_control_payload_t *control,
-                                    const attitude_state_t *attitude) {
-    rate_setpoint_roll = pid_update(&pid_loops[TELEMETRY_LOOP_ANGLE_ROLL],
-                                    angle_setpoint_roll, attitude->roll, MID_LOOP_DT);
-    rate_setpoint_pitch = pid_update(&pid_loops[TELEMETRY_LOOP_ANGLE_PITCH],
-                                     angle_setpoint_pitch, attitude->pitch, MID_LOOP_DT);
+                                    const attitude_state_t *attitude,
+                                    float now_s) {
+    rate_setpoint_roll = flight_control_run_pid(PID_LOOP_ANG_ROLL,
+                                                angle_setpoint_roll, attitude->roll,
+                                                MID_LOOP_DT, now_s);
+    rate_setpoint_pitch = flight_control_run_pid(PID_LOOP_ANG_PITCH,
+                                                 angle_setpoint_pitch, attitude->pitch,
+                                                 MID_LOOP_DT, now_s);
 
     // Yaw has no angle loop - there is no magnetometer, so absolute heading is not observable.
     // The stick commands a yaw RATE directly and the inner loop tracks it.
@@ -524,13 +616,16 @@ static void flight_control_mid_loop(const telemetry_control_payload_t *control,
 }
 
 // Inner loop at 1 kHz: rate error -> mixer -> motors.
-static void flight_control_inner_loop(const attitude_state_t *attitude, float dt) {
-    const float roll_output = pid_update(&pid_loops[TELEMETRY_LOOP_RATE_ROLL],
-                                         rate_setpoint_roll, attitude->roll_rate, dt);
-    const float pitch_output = pid_update(&pid_loops[TELEMETRY_LOOP_RATE_PITCH],
-                                          rate_setpoint_pitch, attitude->pitch_rate, dt);
-    const float yaw_output = pid_update(&pid_loops[TELEMETRY_LOOP_RATE_YAW],
-                                        rate_setpoint_yaw, attitude->yaw_rate, dt);
+static void flight_control_inner_loop(const attitude_state_t *attitude, float dt, float now_s) {
+    const float roll_output = flight_control_run_pid(PID_LOOP_RATE_ROLL,
+                                                     rate_setpoint_roll, attitude->roll_rate,
+                                                     dt, now_s);
+    const float pitch_output = flight_control_run_pid(PID_LOOP_RATE_PITCH,
+                                                      rate_setpoint_pitch, attitude->pitch_rate,
+                                                      dt, now_s);
+    const float yaw_output = flight_control_run_pid(PID_LOOP_RATE_YAW,
+                                                    rate_setpoint_yaw, attitude->yaw_rate,
+                                                    dt, now_s);
 
     flight_control_mix(throttle_command, roll_output, pitch_output, yaw_output, motor_output);
 
@@ -552,6 +647,15 @@ static void flight_control_stop_motors(void) {
     memset(motor_output, 0, sizeof(motor_output));
 }
 
+// THE 1 kHz ENTRY POINT. Called from fc_task on core 1, once per tick, and nowhere else.
+//
+// Order of business:
+//   1. Bail to stopped motors on bad arguments.
+//   2. Count ticks for the measured-loop-rate telemetry.
+//   3. Snapshot the control frame under the spinlock and age it -> link_ok.
+//   4. Run the arming machine. If it says no, STOP THE MOTORS AND RETURN - this is the invariant.
+//   5. Idle cutoff: armed but throttle on the floor -> stopped, integrators cleared.
+//   6. Run the outer / mid / inner loops that are due on this tick.
 void flight_control_update(const attitude_state_t *attitude, const nav_state_t *nav, float dt) {
     if (attitude == NULL || dt <= 0.0f) {
         flight_control_stop_motors();
@@ -609,19 +713,26 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     // (counter == 0) runs all three loops. Otherwise throttle_command would still be the 0 left
     // by the reset for the first 20 ticks, and the mixer's idle floor would spin the motors on
     // a throttle the pilot never commanded.
+    // Shared timebase for the test-signal injection, taken once so all three loops evaluate the
+    // same point on the waveform within one tick.
+    const float now_s = (float)((double)now_us / 1000000.0);
+
     if ((tick_counter % OUTER_LOOP_DIVIDER) == 0) {
-        flight_control_outer_loop(&control, nav);
+        flight_control_outer_loop(&control, nav, now_s);
     }
 
     if ((tick_counter % MID_LOOP_DIVIDER) == 0) {
-        flight_control_mid_loop(&control, attitude);
+        flight_control_mid_loop(&control, attitude, now_s);
     }
 
-    flight_control_inner_loop(attitude, dt);
+    flight_control_inner_loop(attitude, dt, now_s);
 
     tick_counter++;
 }
 
+// Assembles the 50 Hz status frame the dashboard displays. Called from telemetry_task, NOT from
+// the control loop - it re-reads attitude and nav itself rather than being handed the cascade's
+// copies, so it never forces the 1 kHz path to keep anything around for its benefit.
 void flight_control_get_status(telemetry_status_payload_t *out) {
     if (out == NULL) {
         return;
@@ -673,6 +784,14 @@ flight_state_t flight_control_get_state(void) {
     return flight_state;
 }
 
+// --- Live gain tuning, web-dashboard path -----------------------------------------------------
+// These use pid_set_gains(), which PRESERVES the integrator, because the dashboard's workflow is
+// small repeated nudges and resetting on each one would make the aircraft twitch. The ground
+// station's path (pid_registry_apply_gains) deliberately does the opposite - it writes a whole
+// gain set at once, where a stale ki-scaled integrator would appear as a step in the output.
+//
+// Called from telemetry_task with no lock. Tolerated: a float write is atomic on this target, so
+// the worst case is one control iteration using a mixed gain set.
 esp_err_t flight_control_set_gains(telemetry_loop_id_t loop_id, float kp, float ki, float kd) {
     if ((int)loop_id < 0 || (int)loop_id >= TELEMETRY_LOOP_COUNT) {
         return ESP_ERR_INVALID_ARG;

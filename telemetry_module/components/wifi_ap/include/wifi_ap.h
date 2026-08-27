@@ -3,6 +3,21 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+// wifi_ap.h - the SoftAP the pilot's phone or laptop connects to.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Brings up NVS, netif, the event loop and a WPA2 SoftAP, then applies the two settings that
+//   make it a CONTROL link rather than a general-purpose one. Almost all of this component's
+//   value is in those two lines - the rest is the stock ESP-IDF bring-up sequence.
+//
+// HOW IT DOES ITS JOB - the two settings, and why they are different trades
+//   esp_wifi_set_ps(WIFI_PS_NONE)  keeps the radio awake. The default WIFI_PS_MIN_MODEM buffers
+//     frames until the next beacon, adding up to ~100 ms of jitter to a 50 ms control POST.
+//     Costs current, buys latency. MUST be called after esp_wifi_start().
+//   esp_wifi_set_max_tx_power()    turns the radio DOWN from its default maximum. TX power is the
+//     radio's largest current draw and this drone flies across a room. Costs range, and does NOT
+//     affect latency - it is an independent knob from power save.
+//
 // SoftAP for the control dashboard.
 //
 // This is a control link, not a file server: the drone is flown through it, so latency

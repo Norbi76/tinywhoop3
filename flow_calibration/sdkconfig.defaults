@@ -1,0 +1,17 @@
+# Bench tool build defaults - deliberately minimal.
+#
+# Do NOT copy ../flight_controller/sdkconfig.defaults here: it selects a custom partition table
+# (partitions.csv) that does not exist in this project.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ---------------------------------------------------------------------------
+# 1 kHz tick - required, same lesson as ../tof_calibration.
+# pmw3901_init() uses vTaskDelay(pdMS_TO_TICKS(1)) for the SPI-port reset toggles and
+# pdMS_TO_TICKS(5) after the power-up reset. At the IDF default of 100 Hz one tick is 10 ms, so
+# pdMS_TO_TICKS() of anything under 10 truncates to ZERO and those settling delays vanish
+# entirely - which is precisely the bring-up timing this driver depends on.
+# ---------------------------------------------------------------------------
+CONFIG_FREERTOS_HZ=1000
+
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y

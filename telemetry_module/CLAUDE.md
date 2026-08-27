@@ -14,8 +14,12 @@ via `EXTRA_COMPONENT_DIRS` in the top-level `CMakeLists.txt`, not vendored) — 
 types or payload structs must stay compatible with, or be made alongside changes to,
 `flight_controller`.
 
+It also bridges the flight controller's PID tuning traffic onto Wi-Fi over UDP, so the desktop tool
+in `../tools/ground_station` can tune loops in flight. That path is a pure relay — this board never
+interprets those messages.
+
 Sibling directories under `../` (`documents/`, `tinywhoop_frame/`) are reference material, not part
-of this build.
+of this build. `../tools/ground_station` is project code but not part of this build.
 
 ## Build / flash / monitor
 
@@ -57,8 +61,17 @@ it too, or dashboard behavior will diverge between the mock and the real board.
 `app_main()` brings components up in a fixed, dependency-driven order: `control_state` first (so
 every later module has somewhere to read/write), then the UART link to the flight controller
 (before Wi-Fi — this is what actually flies the drone), then camera/SD (**non-fatal**: a missing
-card or failed camera probe is logged and ignored, never blocks flight), then Wi-Fi AP, then the
-HTTP server last.
+card or failed camera probe is logged and ignored, never blocks flight), then Wi-Fi AP, then
+`gs_link` (**non-fatal**, and after the AP so lwIP has a netif to bind to), then the HTTP server
+last — it is what starts accepting pilot input, so everything it touches must already exist.
+
+The fatal/non-fatal split is consistent: anything the pilot needs in order to fly (`control_state`,
+`uart_link`, `wifi_ap`, `http_server`) returns from `app_main` on failure; anything that only makes
+the drone more useful (`camera_sd`, `gs_link`) logs and continues.
+
+Task priorities on core 0, highest first — the ordering is a single statement that the closer
+something is to keeping the drone armed and controllable, the higher it sits:
+UART TX (7) > UART RX (6) > HTTP server (5) > `gs_link` (4). The camera task is 3, on core 1.
 
 - **Core 0**: Wi-Fi/lwIP, the HTTP server, and both UART tasks — the whole control path on one core
   so the 50 Hz UART TX cadence and the 20 Hz dashboard input POSTs are scheduled against each other
@@ -85,10 +98,20 @@ sending valid 50 Hz frames forever and the flight controller's own link watchdog
 
 Two FreeRTOS tasks, both pinned to core 0: TX at a **fixed 50 Hz** regardless of pilot activity
 (higher priority than RX — a missed control frame risks the flight controller's 300 ms link
-watchdog disarming it), piggybacking up to `GAINS_PER_CYCLE` queued PID gain updates per cycle; RX
-continuous, using `uart_telemetry_read_message_resync()` so one corrupted byte costs a single frame
-rather than flushing the whole buffer (important at 50 Hz — a full flush is enough sustained loss to
-trip the flight controller's watchdog).
+watchdog disarming it), piggybacking up to `GAINS_PER_CYCLE` (2) queued PID gain updates and
+`UPLINK_PER_CYCLE` (4) queued ground-station frames per cycle; RX continuous on 5 ms wakeups,
+draining up to `RX_DRAIN_PER_CYCLE` (64) frames before flushing to the ground station and using
+`uart_telemetry_read_message_resync()` so one corrupted byte costs a single frame rather than
+flushing the whole buffer (important at 50 Hz — a full flush is enough sustained loss to trip the
+flight controller's watchdog).
+
+All three of those bounds exist for the same reason: optional traffic must never push the control
+frame late, and a flood of PID debug frames must never monopolise the RX task. Keep them bounded.
+
+**The TX task is the only task in this firmware that calls `uart_telemetry_send_message()`**, and
+that is a hard rule, not a convention: the function bumps a shared sequence counter and then issues
+three separate `uart_write_bytes()` calls, so a second caller interleaves its bytes into another
+task's frame and produces CRC failures on the link that flies the drone. Everyone else queues.
 
 Framed binary protocol: `[start_byte | msg_type | payload_len | seq] [payload 0..64B] [crc16 |
 end_byte]`. Message types and payload structs (`telemetry_control_payload_t`,
@@ -97,6 +120,32 @@ end_byte]`. Message types and payload structs (`telemetry_control_payload_t`,
 frame. **UART pins are TODO/unconfirmed** (`uart_link.h`: GPIO 43/44) — the XIAO Sense's SD card
 uses GPIO 7/8/9, which collided with an earlier pin choice; check against actual wiring before
 flashing a new harness.
+
+### Ground-station bridge (`components/gs_link`)
+
+A UDP bridge (port 14550) tunnelling the flight controller's PID tuning traffic to the Python tool
+in `../tools/ground_station`. **This module does not interpret any of it** — frames off the UART are
+batched into datagrams and datagrams coming back are split into records and queued for the UART TX
+task. It is a pipe, and it runs completely independently of the dashboard: either works without the
+other.
+
+Three things here are non-obvious and load-bearing:
+
+- **The UDP wire format is not the UART frame.** One datagram carries N records of
+  `msg_type(1) | payload_len(1) | seq(2) | payload`. No start byte, no CRC, no end byte — UDP
+  already provides framing and error detection, and re-wrapping would spend ~20% of the link on
+  redundant bytes.
+- **Batching, not per-frame sending.** `gs_link_forward()` only appends; `gs_link_flush()` sends,
+  once per RX drain. At 500 Hz, one datagram per frame would be 500 packets/second and the SoftAP
+  chokes on packet *rate* long before bitrate.
+- **The uplink queue lives in `gs_link`, not `uart_link`** — deliberately, so the dependency runs
+  one way (`uart_link` privately requires `gs_link`; `gs_link` knows nothing about `uart_link`).
+  Putting it in `uart_link` would create a cycle. The queue itself exists because of the
+  single-writer rule above.
+
+Peer discovery is by latching: any inbound packet becomes the current peer before its contents are
+even examined, which is what lets the ground station restart or change IP without touching the
+drone. With no peer, outbound datagrams are dropped silently — that is the normal state.
 
 ### Camera and SD (`components/camera_sd`)
 
@@ -144,8 +193,26 @@ them. Endpoints: `/api/input` (20 Hz button state), `/api/arm`, `/api/mode`, `/a
 ### Shared telemetry protocol vs. `flight_controller`
 
 `../shared_components/telemetry_uart` is the wire contract between this board and
-`../flight_controller`. `telemetry_loop_id_t` ordering must match `pid_loop_id_t` on the flight
-controller side — it addresses one of 8 PID instances for live gain tuning from the dashboard.
-Flight mode enum (`telemetry_flight_mode_t`) and status/control flag bits are likewise shared and
-must be kept in sync across both projects; grep `flight_controller` for the other side of any
-protocol change before making one here.
+`../flight_controller`. Flight mode enum (`telemetry_flight_mode_t`) and status/control flag bits
+are shared and must be kept in sync across both projects; grep `flight_controller` for the other
+side of any protocol change before making one here.
+
+There are **two independent loop-id enums** addressing the same 8 PID instances, and they are
+deliberately not unified: `telemetry_loop_id_t` (inner-to-outer) is the web dashboard's, with its
+values baked into `index.html`; `pid_loop_id_t` (outer-to-inner) is the Python ground station's.
+`pid_registry_bind()` on the flight controller reconciles them. Renumbering either silently retunes
+the wrong axis from the browser.
+
+Message types 20–23 (`PID_DEBUG` / `PID_GAINS` / `PID_SELECT` / `PID_INJECT`) pass through this
+board **uninterpreted** — see `components/gs_link` above. Their payloads carry exact-size
+`_Static_assert`s because `tools/ground_station/protocol.py` unpacks them with hardcoded `struct`
+formats.
+
+## Per-component documentation
+
+Every component has a `README.md` (`components/<name>/README.md`, plus `main/README.md`) covering
+its public API, timing/concurrency model, hardware dependencies, and its own TODO table. Read the
+component's README before editing it; this file is the map, those are the detail. Every source file
+also carries a header comment stating its purpose and mechanism.
+
+`managed_components/` (esp32-camera, esp_jpeg) is third-party — do not edit it.

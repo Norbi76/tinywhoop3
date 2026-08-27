@@ -1,3 +1,27 @@
+// vl53l1_platform.c - the ESP32 side of ST's ULD porting contract.
+//
+// WHAT THIS FILE IS FOR
+//   ST's VL53L1X_api.c reaches hardware through exactly nine functions and nothing else. This
+//   file implements those nine on top of the ESP-IDF i2c_master driver. It is the ONLY place
+//   ST's vendored code touches this board.
+//
+// HOW IT DOES IT
+//   Everything funnels into VL53L1_WriteMulti/VL53L1_ReadMulti; the Wr/Rd Byte/Word/DWord helpers
+//   are just endian-correct wrappers over those two.
+//     - Register indices on this part are 16-BIT and big-endian (unlike the IMU's 8-bit regs).
+//     - Writes stage [index_hi, index_lo, payload...] into one buffer so the whole thing is one
+//       transaction; a separate index write would let another bus user interleave.
+//     - Reads use i2c_master_transmit_receive(), i.e. a repeated START, for the same reason.
+//     - The `dev` argument is the 7-bit address ST passes around opaquely to support multiple
+//       sensors. We have one, so it is discarded and the handle lives in a module static that
+//       vl53l1x_init() installs via vl53l1_platform_set_handle(). The signatures still have to
+//       match ST's headers exactly or their .c files will not compile.
+//
+// WHY THE TIMEOUT IS WHAT IT IS
+//   The VL53L1X clock-stretches while ranging, so a zero timeout would fail spuriously. But this
+//   bus is shared with the 1 kHz IMU loop, so the timeout must also stay well below sensor_task's
+//   period - a dead sensor has to degrade the loop, not stall it. Hence 20 ms.
+
 #include "vl53l1_platform.h"
 #include "vl53l1x_driver.h"
 #include "driver/i2c_master.h"

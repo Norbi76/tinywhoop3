@@ -34,6 +34,21 @@ The viewfinder is served as a synthetic PNG horizon that tilts with the simulate
 under the /preview.jpg path the firmware uses. The extension is a lie but the Content-Type is
 honest, which is all the browser cares about - and it means the preview visibly responds to
 the controls instead of being a still image.
+
+LAYOUT OF THIS FILE
+    constants mirrored from telemetry_uart.h and control_state.c   (marked with comments)
+    ramp_towards / update_axis  - line-for-line copies of the firmware helpers
+    DroneSim                    - setpoint integration, watchdogs, arming, the rigid-body sim
+    png_encode / render_preview - the synthetic viewfinder, stdlib zlib only
+    MockHandler                 - every /api/* endpoint plus the /mock/* fault injection
+    sim_thread / main           - a 50 Hz sim tick, matching the firmware's UART TX cadence
+
+THIS FILE IS A MIRROR, AND MIRRORS ROT.
+    The constants and the integration math above are duplicated from the firmware, not shared
+    with it. If you change a ramp rate, an axis limit, a watchdog timeout, the arming gate or
+    the shape of an /api/* response in components/, change it HERE IN THE SAME COMMIT.
+    Otherwise the dashboard behaves differently against the mock than against the real board,
+    and you will spend an afternoon debugging the difference instead of the bug.
 """
 
 import argparse

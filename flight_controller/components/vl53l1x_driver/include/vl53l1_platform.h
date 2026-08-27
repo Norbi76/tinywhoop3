@@ -1,5 +1,11 @@
 #pragma once
 
+// vl53l1_platform.h - declarations of the ULD porting contract. Implemented in vl53l1_platform.c.
+//
+// These signatures are dictated by ST, not by us: VL53L1X_api.c calls them by exactly these names
+// and prototypes. Do not "improve" them (drop the unused `dev`, change the return type to
+// esp_err_t, etc.) - ST's vendored .c files in st_uld/ will stop compiling.
+//
 // ESP32 platform layer for ST's VL53L1X Ultra Lite Driver (ULD).
 //
 // These nine functions are the entire porting contract of the ULD: ST's VL53L1X_api.c and

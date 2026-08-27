@@ -50,22 +50,22 @@ the drone's `imu_setup()`.
 |---|---|---|
 | SDA | 12 | `CAL_I2C_SDA_GPIO`, `main/main.c` |
 | SCL | 11 | `CAL_I2C_SCL_GPIO`, `main/main.c` |
-| XSHUT | **17** | `VL53L1X_XSHUT_GPIO`, `vl53l1x_driver.c` — see below |
+| XSHUT | **13** | `VL53L1X_XSHUT_GPIO`, `vl53l1x_driver.c` — see below |
 | VIN / GND | 3V3 / GND | |
 
 SDA/SCL default to the drone's pins for familiarity, but nothing about the offset depends on which
 pins the bus runs on — change them to whatever is convenient on the spare board.
 
-**XSHUT is the exception.** It is hardcoded to GPIO 17 in `vl53l1x_driver.c`, which this project
+**XSHUT is the exception.** It is hardcoded to GPIO 13 in `vl53l1x_driver.c`, which this project
 compiles unmodified.
 
 These three numbers are the *drone's*, and they reach the sensor through the custom frame PCB — a
 bare dev board will not necessarily break all of them out. On a XIAO ESP32-S3 in particular the
-header exposes a restricted GPIO set and 17 may not be available at all. So:
+header exposes a restricted GPIO set and 13 may not be available at all. So:
 
 - **Easiest path: tie XSHUT to 3V3.** The driver's reset pulse then lands on an unconnected
-  GPIO 17 and is a harmless no-op; the sensor comes up on power-on reset instead.
-- Or wire XSHUT to GPIO 17 if the board exposes it, which also exercises the drone's assumption.
+  GPIO 13 and is a harmless no-op; the sensor comes up on power-on reset instead.
+- Or wire XSHUT to GPIO 13 if the board exposes it, which also exercises the drone's assumption.
 
 **Do not leave XSHUT floating** — the part may stay in reset and `vl53l1x_init()` will report
 that it never booted. (Many breakouts pull it up, but do not rely on it.)

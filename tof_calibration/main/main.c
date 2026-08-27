@@ -50,9 +50,9 @@ static const char *TAG = "TOF_CAL";
 // that bus); matching it here is convenient but not required, because nothing about the offset
 // depends on which pins the bus runs on.
 //
-// XSHUT is the exception: vl53l1x_driver.c hardcodes GPIO 17 and pulses it low->high at init.
-// Either wire XSHUT to GPIO 17 on this board too, or tie XSHUT to 3V3 (in which case the pulse
-// on an unconnected GPIO 17 is a harmless no-op). Do NOT leave XSHUT floating - the part may
+// XSHUT is the exception: vl53l1x_driver.c hardcodes GPIO 13 and pulses it low->high at init.
+// Either wire XSHUT to GPIO 13 on this board too, or tie XSHUT to 3V3 (in which case the pulse
+// on an unconnected GPIO 13 is a harmless no-op). Do NOT leave XSHUT floating - the part may
 // stay in reset.
 // ---------------------------------------------------------------------------
 #define CAL_I2C_SDA_GPIO 5
@@ -231,7 +231,7 @@ void app_main(void)
     return;
 #else
     ESP_LOGI(TAG, "VL53L1X offset calibration bench tool");
-    ESP_LOGI(TAG, "I2C SDA=%d SCL=%d, XSHUT=GPIO17 (hardcoded in vl53l1x_driver.c)",
+    ESP_LOGI(TAG, "I2C SDA=%d SCL=%d, XSHUT=GPIO13 (hardcoded in vl53l1x_driver.c)",
              CAL_I2C_SDA_GPIO, CAL_I2C_SCL_GPIO);
 
     esp_err_t error = calibration_bus_setup();
@@ -244,7 +244,7 @@ void app_main(void)
     error = vl53l1x_init();
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "vl53l1x_init() failed: %s", esp_err_to_name(error));
-        ESP_LOGE(TAG, "Check 3V3/GND, SDA/SCL, and that XSHUT is high (GPIO 17 or tied to 3V3).");
+        ESP_LOGE(TAG, "Check 3V3/GND, SDA/SCL, and that XSHUT is high (GPIO 13 or tied to 3V3).");
         return;
     }
 

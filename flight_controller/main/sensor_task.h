@@ -4,6 +4,17 @@
 #include "freertos/FreeRTOS.h"
 #include "nav_estimator.h"
 
+// sensor_task.h - the 100 Hz navigation task's public interface.
+//
+// WHAT IT IS FOR
+//   Owns the two slow navigation sensors (ToF, optical flow) and the nav_estimator behind them,
+//   and hands the result to the 1 kHz control loop without ever making it wait.
+//
+// HOW THE HANDOFF WORKS
+//   This task publishes a nav_state_t under a mutex; fc_task calls sensor_task_get_nav_state()
+//   with a ZERO timeout once per iteration and keeps its previous copy if the mutex is busy. A
+//   nav state one 100 Hz cycle stale is harmless to a 50 Hz outer loop; a blocked 1 ms tick is not.
+//
 // The 100 Hz navigation sensor task.
 //
 // Deliberately kept off the 1 kHz control loop and off core 1. The ToF and the flow sensor are

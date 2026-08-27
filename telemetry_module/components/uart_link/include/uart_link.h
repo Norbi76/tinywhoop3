@@ -4,6 +4,28 @@
 #include "freertos/FreeRTOS.h"
 #include "telemetry_uart.h"
 
+// uart_link.h - the serial link to the flight controller. This is the component that flies the
+// drone; Wi-Fi, the dashboard and the camera are all downstream of it.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Carries control frames out to the flight controller and status frames back, and relays the
+//   ground station's tuning traffic in both directions. The wire protocol itself lives in
+//   shared_components/telemetry_uart - this component owns the CADENCE and the task structure.
+//
+// HOW IT DOES ITS JOB
+//   TX task, fixed 50 Hz: integrate the setpoints (control_state_update), send one control frame,
+//   then piggyback a BOUNDED number of queued gain updates and ground-station uplink frames -
+//   bounded so a burst of tuning traffic can never push the control frame late.
+//   RX task, 5 ms wakeups: drain up to 64 frames with the resync reader, cache the status frame,
+//   forward every frame to the ground station, then send ONE batched datagram.
+//
+// TX PRIORITY IS ABOVE RX, deliberately: a missed transmit slot risks the flight controller's
+// 300 ms watchdog disarming the drone, while a late status frame only makes the dashboard stale.
+//
+// ONE WRITER RULE: uart_telemetry_send_message() is not thread-safe, so the TX task is the only
+// task in this firmware that calls it. Everyone else queues - see uart_link_queue_gains() and
+// gs_link_pop_uplink().
+//
 // UART link to the flight controller.
 //
 // Two tasks:

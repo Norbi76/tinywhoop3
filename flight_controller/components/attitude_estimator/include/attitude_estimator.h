@@ -4,6 +4,28 @@
 #include "esp_err.h"
 #include "imu_driver.h"
 
+// attitude_estimator.h - the innermost feedback signal in the aircraft.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Converts raw IMU samples into "which way is the drone pointing, and how fast is it rotating".
+//   flight_control's 1 kHz rate loop reads the three *_rate fields; its 250 Hz angle loop reads
+//   roll and pitch. Everything the aircraft does about attitude starts from this struct.
+//
+// HOW IT DOES IT
+//   A complementary filter: alpha = tau/(tau+dt), angle = alpha*(gyro integration) +
+//   (1-alpha)*(accelerometer angle). The gyro supplies the fast, smooth, drift-prone part; the
+//   accelerometer supplies the slow, noisy, absolute part that cancels the drift. The
+//   accelerometer is GATED OUT whenever |a| leaves 0.8..1.2 g, because under acceleration it no
+//   longer points at gravity - during those samples the filter coasts on pure gyro.
+//
+// THREE THINGS TO KNOW BEFORE USING THIS STRUCT
+//   1. Yaw has NO absolute reference (no magnetometer). It drifts without bound. Fly yaw as a
+//      RATE; treat the yaw field as a display value only.
+//   2. Check `initialized` before trusting roll/pitch. flight_control refuses to arm until it is
+//      true, which takes 500 consecutive good accelerometer samples (~0.5 s).
+//   3. The axis mapping and signs below are NOT verified on hardware. See attitude_estimator.c
+//      and README.md for the bench procedure - and fix any error THERE, not downstream.
+//
 // Complementary-filter attitude estimator.
 //
 // Roll and pitch are fused from the accelerometer (absolute but noisy, and wrong under

@@ -1,3 +1,30 @@
+// control_state.c - setpoint synthesis, the browser watchdogs, and the status cache.
+//
+// WHAT THIS FILE DOES
+//   Input side  (HTTP handlers):  set_buttons / set_arm / set_kill / set_hold / set_mode /
+//                                 flag_capture - these only RECORD intent and pet the watchdog.
+//   Output side (UART TX task):   control_state_update() integrates at a fixed 50 Hz, then
+//                                 control_state_get_frame() packages the result for the wire.
+//   Status side (UART RX task):   store_status / get_status / status_age_ms.
+//
+// HOW THE INTEGRATION WORKS
+//   ramp_towards() is the primitive; update_axis() layers the hold/release policy on top of it
+//   and is shared by roll, pitch and yaw. Throttle deliberately does NOT go through update_axis()
+//   - it has no decay branch at all, which is what makes button-driven altitude possible.
+//
+// WHY TWO MUTEXES
+//   state_mutex and status_mutex guard disjoint data touched by different tasks on different
+//   clocks. The HTTP handler serving /api/status must not contend with the UART TX task
+//   integrating setpoints.
+//
+// EVERY MUTEX TAKE HAS A 5 ms TIMEOUT, never portMAX_DELAY, and every failure path degrades
+// rather than blocks. The important one is in control_state_get_frame(): on a failed take it
+// emits a ZEROED NEUTRAL FRAME rather than nothing, because the flight controller needs a steady
+// 50 Hz or its own link watchdog fires. A safe frame beats no frame.
+//
+// MIRROR ANY CHANGE HERE IN tools/mock_server.py - it reimplements this file's math so the
+// dashboard can be developed without hardware, and divergence shows up as phantom bugs.
+
 #include "control_state.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -23,7 +50,7 @@ static const char *TAG = "CONTROL_STATE";
 #define YAW_RAMP_DPS2 180.0f
 #define YAW_DECAY_DPS2 360.0f
 
-// Throttle trim: persistent, no decay. 25%/second is slow enough to be controllable with a
+// Throttle trim: persistent, no decay. 10%/second is slow enough to be controllable with a
 // button and fast enough to get off the ground without a long press.
 #define THROTTLE_TRIM_RATE_PER_S 0.1f
 #define THROTTLE_MAX 0.85f          // headroom left for the attitude loops to mix in
@@ -222,6 +249,11 @@ void control_state_flag_capture(void) {
     xSemaphoreGive(state_mutex);
 }
 
+// The 50 Hz integration step. Called from the UART TX task, NOT from an HTTP handler - that is
+// what guarantees the ramp rates below are per-second rates and not per-POST rates.
+//
+// Order: watchdogs first (they can synthesise a full button release), then the three ramped axes,
+// then the un-ramped throttle trim.
 void control_state_update(float dt) {
     if (state_mutex == NULL || dt <= 0.0f) {
         return;

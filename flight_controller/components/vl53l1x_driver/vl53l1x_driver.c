@@ -1,3 +1,28 @@
+// vl53l1x_driver.c - bring-up, configuration and sampling of the ToF rangefinder.
+//
+// WHAT THIS FILE DOES
+//   vl53l1x_init()  claims the SHARED I2C bus (it does not create one), pulses XSHUT, polls
+//                   VL53L1X_BootState() until the part is up, runs ST's SensorInit, applies our
+//                   ranging configuration, and starts continuous ranging.
+//   vl53l1x_read()  polls the data-ready flag, pulls distance + status, and CLEARS THE INTERRUPT
+//                   (mandatory - without it the sensor produces exactly one measurement, ever).
+//
+// HOW IT DOES IT
+//   Everything below the config lines is ST's Ultra Lite Driver, reached through the shim in
+//   vl53l1_platform.c. The whole ULD dependency is behind #ifdef VL53L1X_ULD_PRESENT, which
+//   CMakeLists defines only when ST's sources are actually present in st_uld/.
+//
+// WHY EVERY FAILURE PATH HERE IS SOFT
+//   No ESP_ERROR_CHECK, no abort, no fatal log. Missing ULD sources, missing hardware, a sensor
+//   that never boots - all return an error and leave sensor_available false. That propagates:
+//   nav_estimator marks altitude invalid, flight_control disengages the altitude and position
+//   loops, and the drone remains flyable in angle mode. A broken altitude sensor must degrade the
+//   aircraft, not ground it.
+//
+// ORDERING DEPENDENCY
+//   imu_setup() creates I2C_NUM_0; this file only borrows it. main.c enforces the order with
+//   imu_ready_semaphore rather than a CMake dependency, because the coupling is runtime-only.
+
 #include "vl53l1x_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,9 +46,10 @@ static const char *TAG = "VL53L1X";
 // XSHUT is the sensor's active-low shutdown pin. It must be driven high to bring the part out
 // of reset. If you have hard-wired XSHUT to 3V3 instead of a GPIO, set this to -1 and the
 // driver will skip the reset pulse.
-// GPIO 11 and 12 are the I2C bus (imu_driver.c). GPIO 4, 5, 15, 16 are the motors.
+// GPIO 11 and 12 are the I2C bus (imu_driver.c). GPIO 4, 5, 1, 2 are the motors
+// (motor_driver.c is the authority on that list).
 // ---------------------------------------------------------------------------
-#define VL53L1X_XSHUT_GPIO 17
+#define VL53L1X_XSHUT_GPIO 13
 
 // ---------------------------------------------------------------------------
 // TODO(bench): VL53L1X_OFFSET_MM - MEASURE THIS.

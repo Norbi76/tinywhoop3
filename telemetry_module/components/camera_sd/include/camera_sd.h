@@ -5,6 +5,17 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
+// camera_sd.h - the camera and SD card. Completely independent of flight.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Producing capture SETS for photogrammetry, plus a low-resolution viewfinder so the pilot can
+//   aim. Nothing here can stop the drone flying and nothing here runs on the control path's core.
+//
+// HOW IT DOES ITS JOB
+//   One task on core 1 owns the sensor and the card. Every public function callable from an HTTP
+//   handler either sets a flag or pushes to a queue and returns immediately - see the two
+//   numbered points below for why that structure is not optional.
+//
 // Camera capture to SD card, for photogrammetry / 3D Gaussian Splatting reconstruction.
 // Sensor model is detected at runtime; OV3660 (QXGA) and OV2640 (UXGA) are both supported.
 //

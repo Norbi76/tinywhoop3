@@ -3,6 +3,25 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+// pid_controller.h - the generic PID primitive the whole control cascade is built from.
+//
+// WHAT THIS COMPONENT IS FOR
+//   A plain scalar PID with no globals, no tasks, no ESP-IDF dependencies. All state lives in the
+//   caller's pid_controller_t, which is what makes it safe to instantiate eight times.
+//
+// HOW IT DOES ITS JOB - four departures from the textbook formula, all deliberate
+//   1. Derivative on MEASUREMENT, not error -> no motor kick when the pilot steps a stick.
+//   2. Low-pass filtered derivative        -> prop vibration does not reach the motors as D.
+//   3. Conditional-integration anti-windup -> a drone held on the bench does not wind up.
+//   4. The integrator stores the ki-SCALED sum -> changing ki mid-flight does not jolt.
+//   Each is explained where it is implemented in pid_controller.c, and in README.md.
+//
+// TWO RULES FOR CALLERS
+//   - pid_reset() on EVERY arm and disarm. A stale integrator is the classic cause of a quad
+//     flipping the instant it is armed.
+//   - This component locks nothing. If gains must change from another task, go through
+//     pid_registry's queue rather than writing the struct - that is what it is for.
+//
 // Generic PID controller.
 // One implementation, instantiated 8 times by flight_control (3 rate loops, 2 angle loops,
 // 2 velocity loops, 1 altitude loop). Nothing in here knows anything about quadcopters.
@@ -35,12 +54,27 @@ typedef struct {
     float out_min;
     float out_max;
 
+    // Retained so a gain change can recompute d_alpha, and so the live tuning UI can read the
+    // cutoff back. d_alpha alone is not enough: recovering the cutoff from it needs the period,
+    // and there is nowhere else the period is kept.
+    float d_cutoff_hz;
+    float nominal_dt;
+
     bool first_update;       // suppresses the derivative spike on the very first call
 
     // Retained for logging / bench inspection - lets you see which term is doing the work.
     float last_p;
     float last_i;
     float last_d;
+
+    // Everything below is telemetry only. Nothing in the control law reads it back; it exists so
+    // pid_registry can publish a complete picture of one iteration without the loop having to
+    // hand it the setpoint and measurement separately.
+    float last_setpoint;     // as passed in, i.e. injection offset already included
+    float last_measurement;
+    float last_output;       // post-clamp return value
+    bool out_saturated;      // the clamp actually bit on the last iteration
+    bool integrator_clamped; // the integrator was frozen by anti-windup or hit integrator_limit
 } pid_controller_t;
 
 // Initialises a PID instance and clears its state.

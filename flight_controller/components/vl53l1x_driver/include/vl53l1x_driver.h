@@ -5,6 +5,24 @@
 #include "esp_err.h"
 #include "driver/i2c_master.h"
 
+// vl53l1x_driver.h - downward-facing time-of-flight rangefinder, the altitude sensor.
+//
+// WHAT THIS COMPONENT IS FOR
+//   Measures distance to the surface under the drone. nav_estimator turns that into altitude and
+//   climb rate; flight_control's outer loop turns those into altitude hold. This layer reports
+//   RAW line-of-sight range and a status code - no tilt compensation, no filtering, no memory of
+//   previous samples. All of that is nav_estimator's job.
+//
+// HOW IT DOES IT
+//   It is a thin wrapper: our code handles bus/XSHUT/config, ST's Ultra Lite Driver handles the
+//   actual ranging protocol, and vl53l1_platform.c is the nine-function shim ST's code calls to
+//   reach I2C. See README.md in this component for the layer diagram and which files are ours.
+//
+// TWO THINGS CALLERS MUST DO
+//   1. Check vl53l1x_result_t.valid. ESP_OK only means the I2C transaction worked; range_status
+//      is what says the MEASUREMENT is trustworthy.
+//   2. Cope with the sensor not existing at all. Every failure path here is soft - see below.
+//
 // Thin wrapper around ST's VL53L1X Ultra Lite Driver.
 //
 // The sensor shares the I2C bus that imu_driver already created on I2C_NUM_0; this component

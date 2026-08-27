@@ -5,6 +5,28 @@
 #include "esp_err.h"
 #include "telemetry_uart.h"
 
+// control_state.h - the pilot's intent, held in one place.
+//
+// WHAT THIS COMPONENT IS FOR
+//   The dashboard has BUTTONS, not joysticks. Something has to synthesise a continuous setpoint
+//   from a discrete "is this key down right now", and this is that something. It is also where
+//   the last status frame from the flight controller is parked, so the HTTP layer can serve the
+//   dashboard without ever touching the UART.
+//
+// HOW IT DOES ITS JOB
+//   Ramp-on-hold, decay-on-release integration (decay ~2x ramp, so releasing always settles the
+//   drone faster than pressing moved it), driven at a FIXED 50 Hz from the UART TX task rather
+//   than from the HTTP handler - so the ramp rates do not silently change when the browser
+//   stutters. Throttle is the deliberate exception: a persistent trim with no decay branch.
+//
+// TWO WATCHDOGS LIVE HERE, and the second one is the non-obvious one:
+//   500 ms without a POST -> release directional inputs, KEEP the throttle (level out, hold height)
+//     3 s without a POST -> drop the arm request outright
+//   The 3 s backstop exists because the UART link stays perfectly healthy when the BROWSER dies -
+//   the flight controller's own link watchdog would never fire, and the drone would hover forever.
+//
+// If you change any rate, limit or timeout here, mirror it in tools/mock_server.py.
+//
 // Turns the dashboard's held-button state into flight setpoints.
 //
 // The dashboard has no joysticks - it has buttons you press and hold. That means the setpoint

@@ -2,6 +2,60 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+
+<!-- ===========================================================================
+     index.html - the pilot's control dashboard.
+
+     WHAT THIS FILE IS
+       The entire user interface for flying the drone: status readouts, the button pads,
+       arm/disarm/kill, flight mode, the camera viewfinder and the PID tuning sliders. It is
+       ONE self-contained file - HTML, CSS and JS inline, no CDN, no external fonts, no
+       external anything - because the drone's SoftAP has no internet connection and any
+       external reference would simply hang the page mid-load.
+
+       It is COMPILED INTO THE FIRMWARE via EMBED_FILES in this component's CMakeLists.txt, not
+       read from the SD card. So it works with no card fitted and can never go stale relative
+       to the firmware it talks to. The cost is that editing it needs a reflash - use
+       tools/mock_server.py, which serves this file straight off disk, while iterating.
+
+     HOW IT TALKS TO THE BOARD - three independent timers, deliberately different rates
+       every  50 ms (20 Hz)  POST /api/input     held-button state
+       every 120 ms (~8 fps) GET  /preview.jpg   viewfinder, only while preview is on
+       every 200 ms  (5 Hz)  GET  /api/status    everything displayed
+       Everything else is event-driven (arm, mode, capture, gains).
+
+       Input is posted at a FIXED RATE rather than as an event per press. That is what lets the
+       firmware run a browser watchdog at all: silence is unambiguous, whereas with edge events
+       "no message" and "no change" look identical.
+
+       The 20 Hz input POST is NON-OVERLAPPING: a tick is skipped while the previous POST is
+       still in flight, and any POST still open after INPUT_TIMEOUT_MS is aborted. Without this
+       a degraded link queues POSTs against an ESP-IDF HTTP server that services requests
+       SERIALLY on one task, so control latency degrades far worse than the link did. The
+       viewfinder has always worked this way (previewBusy); input now does too.
+
+     THE BROWSER-SIDE SAFETY BEHAVIOUR
+       releaseAll() is wired to blur, pagehide and visibilitychange, so switching tabs or
+       locking the phone releases every button immediately rather than waiting for the
+       firmware's 500 ms timeout to notice. stopPreviewIfHidden() does the same for the camera,
+       so a backgrounded tab stops pulling frames.
+
+       A SCREEN WAKE LOCK is held for as long as this page is visible. This is not a comfort
+       feature. A phone screen blanking on its own idle timer fires visibilitychange, which
+       calls releaseAll(); three seconds later control_state's DISARM_TIMEOUT_US drops the arm
+       request and the drone stops flying. A steady hover with nobody touching the screen is
+       exactly the case that triggers it. The lock is re-requested on every return to visible,
+       because the browser drops it whenever the page is hidden.
+
+       THE CONTROL LINK IS MONITORED SEPARATELY FROM THE STATUS LINK. /api/input (20 Hz) and
+       /api/status (5 Hz) are different requests; the banner used to reflect only the latter,
+       so the path that actually flies the drone could be failing while the page read
+       "Ready to arm". linkAgeMs() drives both the INPUT stat tile and the top banner.
+
+     TWO CSS RULES ARE LOAD-BEARING, not cosmetic - see the comments at each:
+       touch-action:none on .btn, and user-scalable=no on the viewport below.
+     =========================================================================== -->
+
 <!-- user-scalable=no and maximum-scale=1 stop a double-tap on a control button from zooming
      the page mid-flight, which would otherwise move every other button out from under the
      pilot's thumb. -->
@@ -21,6 +75,12 @@ h1{font-size:16px;margin:0 0 8px}
 .stat{background:#151f33;border:1px solid #25314a;border-radius:8px;padding:6px 8px}
 .stat .k{font-size:10px;color:#8fa3c0;text-transform:uppercase;letter-spacing:.06em}
 .stat .v{font-size:15px;margin-top:2px;font-variant-numeric:tabular-nums}
+/* A value the firmware does not actually measure, or one we know is stale, is dimmed rather
+   than hidden - a confident-looking number that is not a measurement is worse than no number. */
+.stat .v.dim{color:#8fa3c0}
+.stat .v.good{color:#7ee2a8}
+.stat .v.warn{color:#f0c674}
+.stat .v.bad{color:#ff9aa2}
 
 /* --- Banner --- */
 #banner{padding:8px;border-radius:8px;margin-bottom:10px;font-weight:600;text-align:center}
@@ -72,7 +132,10 @@ summary{cursor:pointer;font-size:12px;color:#8fa3c0;text-transform:uppercase;let
   <div class="stat"><div class="k">Pitch</div><div class="v" id="s_pitch">-</div></div>
   <div class="stat"><div class="k">Yaw</div><div class="v" id="s_yaw">-</div></div>
   <div class="stat"><div class="k">Alt</div><div class="v" id="s_alt">-</div></div>
-  <div class="stat"><div class="k">Batt</div><div class="v" id="s_batt">-</div></div>
+  <!-- The flight controller has no ADC divider on the pack: flight_control.c reports a fixed
+       nominal 3.8 V. Labelled and dimmed so it can never be mistaken for a real gauge. -->
+  <div class="stat"><div class="k">Batt (nom)</div><div class="v dim" id="s_batt">-</div></div>
+  <div class="stat"><div class="k">Input link</div><div class="v" id="s_input">-</div></div>
   <div class="stat"><div class="k">Loop Hz</div><div class="v" id="s_hz">-</div></div>
   <div class="stat"><div class="k">Photos</div><div class="v" id="s_shots">-</div></div>
 </div>
@@ -199,6 +262,31 @@ function releaseAll() {
   for (var i = 0; i < els.length; i++) els[i].classList.remove('held');
 }
 
+// --- Screen wake lock ------------------------------------------------------
+// Held for as long as the page is visible. See the header comment: a screen that blanks on its
+// own idle timer takes the drone down via releaseAll() and the 3 s disarm timeout.
+//
+// The lock is requested, never awaited by anything else, and every failure path is a no-op:
+// unsupported browser, insecure context, denied by the user, or the OS revoking it. The page
+// must fly exactly the same with no lock - this only removes a way to lose the drone, it is
+// never something the control path depends on.
+var wakeLock = null;
+
+function acquireWakeLock() {
+  if (!navigator.wakeLock || wakeLock || document.hidden) return;
+  navigator.wakeLock.request('screen').then(function(lock) {
+    wakeLock = lock;
+    // Fires when the browser drops it - hiding the tab, or the OS reclaiming it. Clearing the
+    // handle here is what lets the visibilitychange path below take a fresh one.
+    lock.addEventListener('release', function() { wakeLock = null; });
+  }).catch(function() { /* not supported, insecure context, or refused - fly without it */ });
+}
+
+document.addEventListener('visibilitychange', function() {
+  if (!document.hidden) acquireWakeLock();
+});
+acquireWakeLock();
+
 // --- Viewfinder ------------------------------------------------------------
 // OFF by default and stopped whenever the tab is not visible. Frames are requested one at a
 // time: the next request goes out only after the previous image resolves, so if the link
@@ -259,17 +347,61 @@ document.addEventListener('visibilitychange', function() {
 });
 
 // --- Fixed 20 Hz input POST ------------------------------------------------
-var inputFailures = 0;
+// One POST at a time, and never more than INPUT_TIMEOUT_MS in flight.
+//
+// The old version fired every 50 ms regardless of whether the previous fetch had resolved. The
+// server handles requests serially on a single task, so on a weak link the outstanding POSTs
+// queue up behind each other and every one of them carries button state that is already stale
+// by the time it is read. Skipping a tick is strictly better: the firmware integrates setpoints
+// on its own 50 Hz clock and tolerates 500 ms of silence before releasing the axes.
+//
+// A POST still open after INPUT_TIMEOUT_MS is aborted rather than waited on, so one stuck
+// request cannot hold the slot shut forever.
+//
+// 500 ms is deliberate and matches control_state's INPUT_TIMEOUT_US. Past that point the
+// firmware has ALREADY started decaying the axes to neutral, so the frame genuinely has nothing
+// left to deliver. Anything shorter throws away frames that are merely late: a link with a
+// 300 ms round trip is degraded but perfectly flyable, and aborting at 250 ms would mean not one
+// control frame ever landed on it - the drone would decay and then disarm on a link that was
+// still working. Late frames beat no frames.
+var INPUT_TIMEOUT_MS = 500;
+
+var inputBusy = false;
+var lastInputOkMs = 0;      // performance.now() of the last POST the server accepted
+var inputEverOk = false;
+var pageLoadMs = performance.now();
 
 function sendInput() {
-  fetch('/api/input', {
+  if (inputBusy) return;    // previous POST still outstanding - drop this tick
+  inputBusy = true;
+
+  var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var killer = ctrl ? setTimeout(function(){ ctrl.abort(); }, INPUT_TIMEOUT_MS) : 0;
+
+  var opts = {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(held)
-  }).then(function(){ inputFailures = 0; })
-    .catch(function(){ inputFailures++; });
+  };
+  if (ctrl) opts.signal = ctrl.signal;
+
+  fetch('/api/input', opts).then(function(r) {
+    // A 4xx/5xx still means the round trip completed, but it is not an accepted control frame.
+    if (r.ok) { lastInputOkMs = performance.now(); inputEverOk = true; }
+  }).catch(function() {
+    // Network error or our own abort. Either way: no accepted frame, so leave lastInputOkMs
+    // alone and let it age. linkAgeMs() is what turns that age into something the pilot sees.
+  }).then(function() {
+    if (killer) clearTimeout(killer);
+    inputBusy = false;
+  });
 }
 setInterval(sendInput, 50);   // 20 Hz
+
+// Age of the last accepted control frame, in ms. -1 before the first one ever lands.
+function inputAgeMs() {
+  return inputEverOk ? (performance.now() - lastInputOkMs) : -1;
+}
 
 // --- Action buttons --------------------------------------------------------
 function post(url, body) {
@@ -353,7 +485,34 @@ function refresh() {
   fetch('/api/status').then(function(r){ return r.json(); }).then(function(d) {
     var banner = document.getElementById('banner');
 
-    if (!d.link) {
+    // The INPUT tile, and its thresholds. 250 ms is five missed ticks - noticeable but flyable.
+    // 500 ms is control_state's INPUT_TIMEOUT_US: past that the firmware has already begun
+    // decaying the axes to neutral, so it is a real loss of control, not a slow link.
+    // The first status poll fires before the first input POST can possibly have landed, so a
+    // short grace window after load reads as "starting", not as a lost link. Without it the
+    // page alarms at itself for the first fraction of a second every time it is opened.
+    var age = inputAgeMs();
+    var starting = (age < 0) && ((performance.now() - pageLoadMs) < 1000);
+    var inputDown = !starting && ((age < 0) || (age >= 500));
+    var inputEl = document.getElementById('s_input');
+    if (starting) {
+      inputEl.textContent = 'starting'; inputEl.className = 'v dim';
+    } else if (age < 0) {
+      inputEl.textContent = 'no input'; inputEl.className = 'v bad';
+    } else if (age >= 500) {
+      inputEl.textContent = 'LOST';     inputEl.className = 'v bad';
+    } else if (age >= 250) {
+      inputEl.textContent = 'lagging';  inputEl.className = 'v warn';
+    } else {
+      inputEl.textContent = 'ok';       inputEl.className = 'v good';
+    }
+
+    // Input comes first in the banner: /api/status arriving proves the board is reachable, but
+    // it is /api/input that flies the drone, and the two can fail independently.
+    if (inputDown) {
+      banner.className = 'bad';
+      banner.textContent = 'CONTROL INPUT NOT REACHING THE DRONE';
+    } else if (!d.link) {
       banner.className = 'bad';
       banner.textContent = 'NO LINK TO FLIGHT CONTROLLER';
     } else if (d.killed) {
@@ -376,6 +535,7 @@ function refresh() {
     setText('s_pitch', d.pitch.toFixed(1) + '°');
     setText('s_yaw', d.yaw.toFixed(1) + '°');
     setText('s_alt', d.alt_valid ? d.altitude.toFixed(2) + ' m' : 'n/a');
+    // Nominal, not measured - see the tile's comment above and flight_control.c.
     setText('s_batt', d.battery.toFixed(2) + ' V');
     setText('s_trim', Math.round(d.throttle_trim * 100) + '%');
     setText('s_hz', d.loop_hz);

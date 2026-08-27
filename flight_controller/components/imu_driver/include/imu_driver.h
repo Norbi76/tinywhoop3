@@ -1,3 +1,28 @@
+// imu_driver.h - public interface to the MPU-9250-class 6-axis IMU on I2C0.
+//
+// WHAT THIS COMPONENT IS FOR
+//   The bottom of the attitude pipeline: read the accelerometer, gyroscope and temperature, and
+//   hand back trustworthy numbers in physical units. It holds NO filter state and does not track
+//   attitude over time - that is attitude_estimator's job. The only angle it produces,
+//   imu_compute_roll_pitch(), is a stateless read of where gravity points in this one sample.
+//
+// HOW IT DOES IT
+//   Two data structs and a two-step pipeline. imu_read_raw_data() does ONE 14-byte I2C burst
+//   (the accel, temp and gyro registers are contiguous, so all seven values are sampled at the
+//   same instant and cost one transaction - which is what makes it fit in the 1 kHz loop).
+//   imu_convert_raw_to_physical() then applies the fixed scale factors and subtracts the gyro
+//   bias measured at boot by imu_calibrate_gyro().
+//
+// CALL ORDER
+//   imu_setup() -> imu_calibrate_gyro() -> imu_calibrate_acc()   once, at startup, from fc_task
+//   imu_read_raw_data() -> imu_convert_raw_to_physical()         every 1 kHz tick
+//
+//   imu_setup() is what CREATES the I2C bus that the ToF rangefinder also lives on, so nothing
+//   may touch vl53l1x_driver until it has returned. main.c enforces that with imu_ready_semaphore.
+//
+// See README.md in this component for the register configuration, why ACCEL_CONFIG2 matters, and
+// how the gyro calibration's motion check works.
+
 #pragma once //previne includerea multipla a fisierului
 #include "esp_err.h"
 #include <stdint.h>

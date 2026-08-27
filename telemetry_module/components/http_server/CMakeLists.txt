@@ -1,3 +1,6 @@
+# http_server - serves the dashboard and the /api/* control surface.
+# This component is the top of the dependency graph on this board: it drives control_state,
+# camera_sd, uart_link and wifi_ap, and nothing depends on it.
 idf_component_register(SRCS "http_server.c"
                     INCLUDE_DIRS "include"
                     # http_server.h exposes only esp_err_t. Everything it drives is an

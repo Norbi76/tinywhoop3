@@ -1,3 +1,27 @@
+// http_server.c - the nine request handlers and the server configuration.
+//
+// LAYOUT
+//   read_body()                  bounded body read + NUL terminate
+//   json_flag() / json_number()  the hand-rolled scraping (see the comment above them)
+//   handler_*()                  one per endpoint, in the order they are registered
+//   uri_handlers[]               the registration table
+//   http_server_start/stop()
+//
+// THE RULE EVERY HANDLER FOLLOWS
+//   Do the minimum and return. All handlers run on ONE ESP-IDF HTTP task at priority 5, which is
+//   BELOW both UART tasks - so a slow handler cannot delay a control frame, but it can delay the
+//   next 20 Hz input POST, and those POSTs are what the browser watchdog in control_state is
+//   watching. Hence: no file I/O, no blocking queue waits, no waiting on the camera.
+//
+//   The two places this shows most clearly are /api/capture (queues a token; the SD write, which
+//   can take hundreds of milliseconds, happens on the camera task on core 1) and /preview.jpg
+//   (one frame per request rather than an MJPEG stream, because the HTTP server is serial and a
+//   long-lived response would occupy the task for as long as the stream stayed open).
+//
+// SERIALISATION IS FREE HERE. One task means handlers cannot race each other, which is why the
+// 32 KB preview buffer can safely be a static. Cross-task safety comes from the components being
+// called - control_state has mutexes, uart_link and camera_sd have queues.
+
 #include "http_server.h"
 #include "control_state.h"
 #include "camera_sd.h"
@@ -14,7 +38,8 @@
 
 static const char *TAG = "HTTP";
 
-// index.html is compiled into the binary by EMBED_FILES in main/CMakeLists.txt, so there is
+// index.html is compiled into the binary by EMBED_FILES in THIS component's CMakeLists.txt (not
+// main's - the dashboard belongs to the component that serves it), so there is
 // no filesystem dependency for serving the dashboard - it works even with no SD card.
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
