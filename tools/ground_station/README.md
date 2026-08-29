@@ -168,15 +168,108 @@ so `flight_control_get_status()` reports a fixed 3.8 V and the flight controller
 battery frame. This tool parses both message types, so it will start reporting real numbers the
 moment sensing is fitted — nothing here needs changing.
 
-## Logging
+## Flight logging
 
-The **log to CSV** toggle on each loop writes `log_<loop>_<timestamp>.csv` in the working
-directory, with a header row and one row per sample: `t_s, setpoint, measurement, error, p, i, d,
-output, flags`. Logging follows what is being streamed, so only the visible loop is captured.
+The **REC** button in the top bar records the whole flight to one file:
+`flight_<date>_<time>.ndjson` in the working directory. This is a different thing from the
+per-loop **log to CSV** checkbox — that one captures a single PID loop for tuning, this one
+captures the flight. Both can be on at once.
+
+What goes in, and where each stream comes from:
+
+| Record | Rate | Contents |
+|---|---|---|
+| `header` | once | when, the gains on every loop at the moment recording started, which tab was open |
+| `status` | 50 Hz | the flight controller's own view: attitude, altitude, climb, body velocity, all four motor outputs, loop rate, mode, flags |
+| `control` | 50 Hz | **what the pilot commanded** — the frame the telemetry module sent the flight controller |
+| `pid` | 50 Hz | the streaming loop's setpoint, measurement, P/I/D and output, thinned from up to 500 Hz |
+| `link` | 1 Hz | packet rate and online/offline, so a bad radio moment is visible as itself |
+| `event` | — | arming, kill, mode and gain changes, tab selections, link transitions, your markers |
+| `footer` | once | on a clean stop. **Its absence means the session died**, which the report tells you |
+
+About 1.5 MB per minute. Newline-delimited JSON, one record per line, appended as you fly — so a
+log from a session that ended in a crash is still readable right up to the moment it stopped. That
+is the reason for the format, and it is why recording is **always plain text**: a gzip stream
+buffers inside the compressor, so a log killed mid-flight would be entirely unreadable rather than
+readable up to the last line. Gzip them afterwards if you want to keep a lot — everything that
+reads a log opens `.ndjson.gz` transparently.
+
+### The control echo, and why it needed a firmware change
+
+The ground station used to see only what the drone *reported*. The control frame is built and
+sent by the telemetry module, so nothing on this side ever knew what the pilot had asked for —
+and a log showing the drone rolling right is ambiguous until you can see whether roll right was
+being commanded.
+
+`uart_link.c` now echoes every outgoing control frame to the ground station. It costs nothing on
+the UART that flies the drone (the frame is already sent by then) and 1.15 kB/s on Wi-Fi. It goes
+through a queue rather than straight into `gs_link_forward()`, because that function's batch
+buffer is lock-free *on the condition* that only the RX task touches it.
+
+Each echo carries its own sequence number, so the ground station can tell when command frames
+were lost in transit. Gaps are recorded as `control_gap` events and the report prints them —
+which matters, because the command-versus-actual section refuses to pair a status frame with a
+command more than 0.2 s old. A hole in the command trace is the one thing that could make that
+section draw a confident wrong conclusion, so it excludes what it cannot pair and says how much.
+
+**A module running older firmware simply never sends these.** Everything still records; the log
+just has no command trace, and the report says so instead of guessing.
+
+### Markers
+
+**M** — or the MARK button — stamps the current instant. Press it the moment something looks
+wrong; you do not need to be looking at the screen, and the report lists markers first, so it is
+where you start reading afterwards. **Shift+M** adds a typed note, which opens a modal dialog and
+is therefore for use on the ground.
+
+### Reading a log back
+
+The **replay** tab opens one: attitude with the commanded angles dashed over it, altitude against
+throttle demand, body velocity, and all four motors — X-linked, with armed periods shaded, kills
+shaded red, and your markers drawn across every plot. The report sits beside the plots, and
+**copy report** puts it on the clipboard.
+
+Stopping a recording loads it into the replay tab automatically.
+
+Without the GUI, and without needing PyQt6, numpy or pyqtgraph installed at all:
+
+```bash
+python3 logtool.py flight_20260827_181500.ndjson       # the report
+python3 logtool.py flight.ndjson --slice 41.0 48.5     # just that window
+python3 logtool.py flight.ndjson --events              # just the timeline
+python3 logtool.py flight.ndjson --csv flight.csv      # status stream for a spreadsheet
+```
+
+### What the report actually tells you
+
+It is built around separating causes that look identical from the air:
+
+- **Link first.** A gap in the downlink explains everything after it, so nothing else is worth
+  reading across one. It also flags the flight controller reporting its *own* control link
+  unhealthy — a different link, and the one that disarms you after 300 ms.
+- **How each arm session ended** — the pilot letting go, a KILL (and from which of the two places
+  it can come), or a watchdog. These are indistinguishable in the status stream alone.
+- **Command versus actual**, including a "hands off" figure: the mean attitude over every frame
+  where roll and pitch were commanded within a degree of level. A drone holding a tilt while
+  being asked to stay level is a trim or balance problem, and no gain change fixes it.
+- **Motor balance.** At a steady hover the four outputs should sit close together. A spread wider
+  than 15% is called out, with which corner is working hardest — that corner is the one being
+  held up, so the airframe is falling towards the opposite one. Cross-check it against the drift
+  direction above.
+- **Sensor validity as a percentage of armed time**, next to what each flag gates. "POS HOLD did
+  nothing" is almost always `velocity_valid` never being set, and that is invisible unless you
+  look for it.
+- **Per-loop saturation and integrator clamping.** A loop pinned at its output limit cannot be
+  fixed by tuning it, and it is worth knowing that before spending an evening trying.
+
+Where a number cannot be computed the report says so rather than printing a default that reads
+like a measurement.
+
+## Gain profiles
 
 Gain profiles save and load all eight loops to a JSON file. **Loading only fills the editors** —
-nothing is sent until you press apply on a tab, because pushing eight gain sets at once would reset
-every integrator on the drone.
+nothing is sent until you press apply on a tab, because pushing eight gain sets at once would
+reset every integrator on the drone.
 
 ## Files
 
@@ -184,8 +277,11 @@ every integrator on the drone.
 |---|---|
 | `protocol.py` | Struct formats, message ids and the `LOOPS` table. Mirrors `telemetry_uart.h` — change both together. |
 | `link.py` | UDP socket, receive thread, keepalive thread, per-loop numpy ring buffers. |
-| `panels.py` | The per-loop tuning panel and the overview panel. |
-| `gs.py` | Main window, tab handling, top bar, entry point. |
+| `panels.py` | The per-loop tuning panel, the overview panel and the replay panel. |
+| `gs.py` | Main window, tab handling, top bar, recording controls, entry point. |
+| `flightlog.py` | The flight recorder and the reader. No Qt, no numpy. |
+| `flightreport.py` | Turns a log into the text report. Standard library only. |
+| `logtool.py` | Command-line front end to the two above. |
 
 Two invariants worth keeping if you edit this:
 
@@ -193,3 +289,9 @@ Two invariants worth keeping if you edit this:
 - **The ring buffers are preallocated numpy arrays, not lists of tuples.** At 500 Hz a
   list-of-tuples allocates tens of thousands of short-lived objects a minute, and the resulting GC
   pauses are visible as stutter in the plots.
+- **Nothing on the receive thread may block.** The flight recorder is called from the middle of
+  the socket loop and only ever appends to an in-memory queue; a separate writer thread does the
+  disk I/O. A stalled write there would show up as lost telemetry, not as a slow log.
+
+`flightlog.py`, `flightreport.py` and `logtool.py` deliberately import none of PyQt6, numpy or
+pyqtgraph, so a log can be read on a machine that has none of them installed.

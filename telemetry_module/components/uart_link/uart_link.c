@@ -17,6 +17,18 @@
 //   drain instead of one per frame, because at 500 Hz the latter is 500 packets/second and the
 //   SoftAP chokes on packet RATE long before bitrate.
 //
+// WHY THE CONTROL ECHO GOES THROUGH A QUEUE INSTEAD OF STRAIGHT INTO gs_link_forward()
+//   The ground station used to see only what the drone REPORTED, never what the pilot ASKED FOR,
+//   because the control frame is built and sent by the TX task and forwarding happens on the RX
+//   task. A flight log without the commanded setpoints cannot answer "was the pilot fighting it
+//   or was it drifting on its own", so the frame is now echoed to the ground station too.
+//
+//   It is NOT forwarded from the TX task. gs_link.c's locking map says g_batch needs no mutex
+//   *precisely because* forward() and flush() are only ever called from the RX task; calling
+//   forward() from a second task would race g_batch_len and corrupt or overrun the datagram
+//   buffer. So the TX task hands the payload to control_echo_queue and the RX task, which is
+//   already the single writer, does the forwarding. Same shape as the gains and uplink queues.
+//
 // LOGGING IS RATE-LIMITED to once a second on both send-failure paths. At 50 Hz an unconditional
 // ESP_LOGE would saturate the console UART on its own.
 
@@ -52,14 +64,39 @@ static const char *TAG = "UART_LINK";
 // wakeup this is 12800 frames/second of headroom against a worst case near 550.
 #define RX_DRAIN_PER_CYCLE 64
 
+// Control-frame echo to the ground station. See the header comment for why this is a queue.
+//
+// Depth 4 against a producer at 50 Hz (one every 20 ms) and a consumer waking every 5 ms: the RX
+// task gets four chances to drain each frame, so the queue only backs up if that task has been
+// starved for the better part of a tenth of a second, at which point a missing log sample is the
+// least of the problems. The send is zero-timeout, so a full queue costs one echoed frame and
+// never delays the control frame itself.
+//
+// COSTS NOTHING ON THE UART. gs_link_forward() only appends to the outbound UDP batch; the frame
+// that flies the drone is already on the wire by then. On Wi-Fi it is 23 B per frame at 50 Hz =
+// 1.15 kB/s, and it rides in datagrams that are being sent anyway.
+#define CONTROL_ECHO_QUEUE_LENGTH 4
+
+// How many echoes to forward per RX drain. Four covers the worst backlog the queue can hold.
+#define CONTROL_ECHO_PER_CYCLE 4
+
 static QueueHandle_t gains_queue;
+static QueueHandle_t control_echo_queue;
 static uint32_t rx_frame_count;
 static uint32_t tx_cycle_count;
+static uint32_t control_echo_dropped;
 
 esp_err_t uart_link_init(void) {
     gains_queue = xQueueCreate(GAINS_QUEUE_LENGTH, sizeof(telemetry_gains_payload_t));
     if (gains_queue == NULL) {
         ESP_LOGE(TAG, "Failed to create gains queue");
+        return ESP_FAIL;
+    }
+
+    control_echo_queue = xQueueCreate(CONTROL_ECHO_QUEUE_LENGTH,
+                                      sizeof(telemetry_control_payload_t));
+    if (control_echo_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create control echo queue");
         return ESP_FAIL;
     }
 
@@ -111,6 +148,16 @@ static void uart_link_tx_task(void *args) {
                 ESP_LOGE(TAG, "Control frame send failed: %s", esp_err_to_name(error));
                 last_log_tick = now_tick;
             }
+        }
+
+        // --- Echo the same frame to the ground station ----------------------
+        // Queued, not forwarded here: the RX task owns gs_link's batch buffer. See the header.
+        // Sent whether or not the UART send above succeeded, deliberately - a log that shows the
+        // pilot commanding right while nothing reached the flight controller is exactly the
+        // picture you want when working out why the drone did not respond.
+        if (control_echo_queue != NULL &&
+            xQueueSend(control_echo_queue, &control, 0) != pdTRUE) {
+            control_echo_dropped++;
         }
 
         // --- Piggyback any queued gain updates -----------------------------
@@ -208,6 +255,29 @@ static void uart_link_rx_task(void *args) {
             drained++;
         }
 
+        // --- Fold in the TX task's control echoes ---------------------------
+        // These never came off the UART; they are what the telemetry module SENT. Forwarded from
+        // here rather than from the TX task so that this task stays the only writer of gs_link's
+        // batch buffer - see the header comment.
+        //
+        // The sequence number is this echo's own counter, not the UART sequence, so the ground
+        // station can spot a gap and know its flight log is missing frames rather than that the
+        // pilot stopped commanding. It is deliberately allowed to wrap at 16 bits.
+        if (control_echo_queue != NULL) {
+            static uint16_t echo_seq;
+            telemetry_message_t echo = {0};
+            echo.header.msg_type = TELEMETRY_MSG_CONTROL;
+            echo.header.payload_len = (uint8_t)sizeof(telemetry_control_payload_t);
+
+            for (int i = 0; i < CONTROL_ECHO_PER_CYCLE; i++) {
+                if (xQueueReceive(control_echo_queue, echo.payload, 0) != pdTRUE) {
+                    break;
+                }
+                echo.header.seq = echo_seq++;
+                gs_link_forward(&echo);
+            }
+        }
+
         // One datagram per drain rather than one per frame. At 500 Hz the latter would be 500
         // packets/second and the SoftAP would choke on the packet rate long before the bitrate.
         gs_link_flush();
@@ -257,4 +327,8 @@ uint32_t uart_link_get_rx_count(void) {
 
 uint32_t uart_link_get_tx_count(void) {
     return tx_cycle_count;
+}
+
+uint32_t uart_link_get_control_echo_dropped(void) {
+    return control_echo_dropped;
 }

@@ -3,6 +3,11 @@
 Everything in here runs off the GUI thread. The one rule that keeps that safe: the receive thread
 only ever writes into the numpy ring buffers and emits Qt signals; it never touches a widget. All
 drawing happens on the GUI thread, driven by the single timer in gs.py.
+
+FLIGHT RECORDING hangs off the same receive path. `Link.recorder` is either None or a
+flightlog.FlightRecorder, and _handle_record() hands it every frame as it is parsed. The recorder
+only appends to an in-memory queue - it does no disk I/O on this thread - which is what makes it
+safe to put in the middle of the socket loop. See flightlog.py's threading note.
 """
 
 import socket
@@ -134,6 +139,13 @@ class Link(QObject):
 
         self.status = None
         self.battery = None
+        self.control = None      # last control frame echoed by the telemetry module, or None
+        self._control_seq = None # last echo sequence number seen, for gap detection
+        self.control_gaps = 0    # command frames known to have been lost in transit
+
+        # Set to a flightlog.FlightRecorder to record, None to stop. Read into a local on the
+        # receive thread before use so that stopping a recording mid-frame cannot race.
+        self.recorder = None
 
         self._running = True
         self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True, name="gs-rx")
@@ -207,10 +219,15 @@ class Link(QObject):
                 self._packet_window_count = 0
                 self._packet_window_start = now
 
-            for msg_type, _seq, payload in P.split_records(data):
-                self._handle_record(msg_type, payload)
+            for msg_type, seq, payload in P.split_records(data):
+                self._handle_record(msg_type, payload, seq)
 
-    def _handle_record(self, msg_type, payload):
+    def _handle_record(self, msg_type, payload, seq=0):
+        # One local reference, taken once. self.recorder can be cleared from the GUI thread at any
+        # moment; reading it repeatedly would mean a stop landing between two of those reads and
+        # raising AttributeError inside the socket loop.
+        recorder = self.recorder
+
         if msg_type == P.MSG_PID_DEBUG:
             if len(payload) < P.S_DEBUG.size:
                 return
@@ -223,15 +240,52 @@ class Link(QObject):
             ring.push(t_us, setpoint, measurement, p_term, i_term, d_term, output, flags)
             self.samples_in += 1
 
+            if recorder is not None:
+                loop = P.loop_by_id(loop_id)
+                recorder.pid(loop.name if loop else f"loop{loop_id}", loop_id, t_us,
+                             setpoint, measurement, p_term, i_term, d_term, output, flags)
+
         elif msg_type == P.MSG_PID_GAINS:
             gains = P.unpack_gains(payload)
             if gains is not None:
                 self.gains_received.emit(gains)
+                if recorder is not None:
+                    loop = P.loop_by_id(gains["loop_id"])
+                    recorder.event("gains_read", loop=loop.name if loop else gains["loop_id"],
+                                   **{key: value for key, value in gains.items()
+                                      if key != "loop_id"})
 
         elif msg_type == P.MSG_STATUS:
             status = P.unpack_status(payload)
             if status is not None:
                 self.status = status
+                if recorder is not None:
+                    recorder.status(status)
+
+        elif msg_type == P.MSG_CONTROL:
+            # An echo of what the telemetry module sent the flight controller - the pilot's
+            # demand. See protocol.unpack_control() for why an uplink message type arrives here.
+            control = P.unpack_control(payload)
+            if control is not None:
+                self.control = control
+
+                # The echo carries its own 16-bit counter (uart_link.c stamps it), so a gap means
+                # command frames were lost between the module and here. That matters more than a
+                # gap in any other stream: the report compares the drone's attitude against the
+                # command in force, and a hole in the command trace is the one thing that can make
+                # it draw a confident wrong conclusion. Recorded as an event so it is visible.
+                if self._control_seq is not None:
+                    missing = (seq - self._control_seq - 1) & 0xFFFF
+                    # Only a plausible gap. A huge value is the module having restarted its
+                    # counter, not sixty thousand lost frames.
+                    if 0 < missing < 1000:
+                        self.control_gaps += missing
+                        if recorder is not None:
+                            recorder.event("control_gap", frames=missing)
+                self._control_seq = seq
+
+                if recorder is not None:
+                    recorder.control(control)
 
         elif msg_type == P.MSG_BATTERY:
             battery = P.unpack_battery(payload)

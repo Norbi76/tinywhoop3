@@ -78,3 +78,11 @@ uint32_t uart_link_get_rx_count(void);
 
 // Number of TX cycles completed since boot.
 uint32_t uart_link_get_tx_count(void);
+
+// Control frames that could not be echoed to the ground station because the echo queue was full.
+//
+// The echo is what lets a flight log show the commanded setpoints next to the measured attitude.
+// It is dropped rather than waited on, so this counter is the only evidence a log has gaps in the
+// command trace. Any sustained growth means the RX task is being starved, which is worth knowing
+// for its own sake - that task also feeds the dashboard's attitude readout.
+uint32_t uart_link_get_control_echo_dropped(void);

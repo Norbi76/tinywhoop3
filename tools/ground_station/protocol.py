@@ -186,6 +186,35 @@ def unpack_status(payload):
     }
 
 
+def unpack_control(payload):
+    """Returns a dict of a control frame, or None on a short payload.
+
+    THIS IS A DOWNLINK USE OF AN UPLINK MESSAGE, and that is deliberate rather than sloppy.
+    TELEMETRY_MSG_CONTROL is what the telemetry module sends the flight controller at 50 Hz. The
+    module now also echoes every one of those frames to the ground station (see uart_link.c), so
+    a flight log can show what the PILOT ASKED FOR next to what the drone actually did - the
+    single most useful pair of traces there is when working out why a flight went wrong.
+
+    Direction disambiguates the reuse completely: a CONTROL record arriving here is an echo, and
+    a CONTROL record we send is a command. Nothing has to look at anything but which way it went.
+
+    Older module firmware simply never sends these, in which case the flight log has no control
+    trace and everything else still works.
+    """
+    if len(payload) < S_CONTROL.size:
+        return None
+    roll, pitch, yaw, throttle, armed, flight_mode, flags = S_CONTROL.unpack_from(payload)
+    return {
+        "roll_sp": roll,          # commanded roll angle, degrees
+        "pitch_sp": pitch,        # commanded pitch angle, degrees
+        "yaw_rate_sp": yaw,       # commanded yaw RATE, deg/s - yaw has no angle loop
+        "throttle": throttle,     # 0.0 - 1.0 trim
+        "armed_request": armed,   # what the pilot asked for, NOT whether the motors are live
+        "mode_request": flight_mode,
+        "flags": flags,
+    }
+
+
 def unpack_battery(payload):
     """Returns a dict of a battery frame, or None on a short payload."""
     if len(payload) < S_BATTERY.size:
