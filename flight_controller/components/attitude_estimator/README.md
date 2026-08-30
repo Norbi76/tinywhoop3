@@ -45,22 +45,63 @@ angle PID for yaw, and `telemetry_control_payload_t.yaw_setpoint` is a rate in �
 
 **Do not build anything that assumes absolute heading.**
 
-## The accelerometer gate
+## The accelerometer low-pass and gate
 
-Before fusing, the filter checks the accelerometer's total magnitude:
+The three accelerometer components are low-passed at **15 Hz** (first-order RC, alpha recomputed
+from the measured `dt` each call), and both the gate and the angle calculation use the filtered
+signal:
 
 ```
-0.8 g  <=  |a|  <=  1.2 g
+0.7 g  <=  |a_filtered|  <=  1.3 g
 ```
 
 If the drone is genuinely stationary or in steady flight, gravity dominates and `|a| ≈ 1 g`.
-During an aggressive manoeuvre or a bump, `|a|` departs from 1 g and the derived angle is
-meaningless. Outside the window the accelerometer is **gated out** for that sample: the filter
-coasts on pure gyro integration and sets `accel_valid = false`.
+During an aggressive manoeuvre `|a|` departs from 1 g and the derived angle is meaningless.
+Outside the window the accelerometer is **gated out** for that sample: the filter coasts on pure
+gyro integration and sets `accel_valid = false`.
 
-This is a cheap, effective test. What it cannot catch is a *sustained coordinated* acceleration
-where the magnitude happens to stay near 1 g while the direction is wrong — but that requires
-holding a precise bank angle for seconds, which a hand-flown whoop does not do.
+### ⚠ Why the low-pass exists — it fixed a real drift bug (2026-08-29)
+
+The gate used to run on the **raw** magnitude at 1 kHz, and the window was 0.8–1.2 g. Prop
+vibration swings the instantaneous magnitude far past ±0.2 g, so most samples in powered flight
+failed the gate, the filter degenerated into pure gyro integration, and gyro bias accumulated as
+roll/pitch error over minutes. The pilot symptom was "after a few minutes the IMU accumulates a
+lot of error on roll and pitch".
+
+The 2026-08-27 flight log isolates it cleanly: **with motors off, drift was 0.0–0.3 °/min** — the
+filter was never the problem. Drift appeared only under power. The accelerometer was not wrong, it
+was being discarded.
+
+Vibration is high frequency, gravity is DC, so the two are separable in frequency. Filtering
+removes the interference; widening the gate alone would only have admitted the vibration into the
+angle calculation, trading drift for noise. Simulated against 1 kHz sampling with tonal prop
+vibration plus broadband noise:
+
+| Vibration | Old gate accepts | LPF + new gate accepts | Mean per-sample roll error, raw → filtered |
+|---|---|---|---|
+| 0.2 g (mild) | 75.5% | 100% | 4.2° → 0.5° |
+| 0.5 g (typical) | 35.7% | 99.9% | 13.4° → 1.3° |
+| 1.0 g (harsh) | 25.0% | 99.0% | 30.7° → 2.7° |
+
+The added phase lag is irrelevant here: the complementary filter already weights the accelerometer
+at `(1 - alpha) = dt/(tau+dt)` ≈ 0.2% per sample, so it is only ever a long-term levelling
+reference. Tens of milliseconds of lag against a 0.5 s time constant does not show up in the
+output.
+
+`ACCEL_LPF_CUTOFF_HZ = 15.0f` is a sensible starting point for a whoop, **not a measured value**.
+If drift persists, lower it before touching the gate.
+
+### Watching it work
+
+`accel_valid` is **not** carried in the 50 Hz status frame, so neither the dashboard nor the
+flight logs can show it — which is why this bug stayed invisible for so long. `attitude_update()`
+therefore prints the accept ratio to the USB serial console once per second
+(`ATTITUDE_HEALTH_LOG_ENABLED`). Spin the props on the bench and watch it: a healthy filter accepts
+nearly everything. A low ratio means the cutoff is still too high.
+
+The gate cannot catch a *sustained coordinated* acceleration where the magnitude stays near 1 g
+while the direction is wrong — but that needs a precise bank angle held for seconds, which a
+hand-flown whoop does not do.
 
 ## Initialisation gate
 
@@ -138,9 +179,14 @@ there. **Fix it here and it is fixed for the entire cascade** — do not compens
 | `AXIS MAPPING NEEDS BENCH VERIFICATION` | `attitude_estimator.h` (all three rates) | Gyro axis → body axis assignment |
 | Block comment | `attitude_update()` | The full bench procedure, reproduced above |
 
-The gate window (0.8–1.2 g), `tau` (0.5 s) and the init sample count (500) are reasonable starting
-values, not measured ones — but unlike the axis mapping, getting them slightly wrong degrades
-performance rather than inverting a control loop.
+The LPF cutoff (15 Hz), the gate window (0.7–1.3 g), `tau` (0.5 s) and the init sample count (500)
+are reasonable starting values, not measured ones — but unlike the axis mapping, getting them
+slightly wrong degrades performance rather than inverting a control loop.
+
+That said, the cutoff is the one to watch: it is the constant that decides whether the
+accelerometer participates in the fusion at all under power. The old raw-signal gate is proof that
+getting this wrong is not a mild degradation — it silently turned a fused filter into a bare
+integrator. Check the accept ratio in the serial log after any change to props, motors or frame.
 
 ## Dependencies
 

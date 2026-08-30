@@ -75,6 +75,38 @@ static const char *TAG = "FLIGHT_CTRL";
 #define MOTOR_IDLE_THRESHOLD 0.05f
 
 // ---------------------------------------------------------------------------
+// DISARMED MONITOR MODE  (added 2026-08-29)
+//
+// WHAT IT IS
+//   While DISARMED, run the OUTER LOOP ONLY and publish its PID internals, with the motors
+//   already forced to zero by the invariant in flight_control_update(). Nothing else in the
+//   cascade runs: no mid loop, no inner loop, no mixer, no motor write.
+//
+// WHY IT EXISTS
+//   The velocity->angle sign in flight_control_outer_loop() is unverified, and a wrong sign there
+//   is positive feedback - the drone accelerates away from the hold point instead of settling.
+//   Until this existed there was no way to check that sign except to engage position hold in
+//   flight and watch what happened, which is a bad way to discover the answer.
+//
+//   With this on, the check is done with the drone IN YOUR HAND: hold it 20-50 cm over a textured
+//   floor, press HOLD on the dashboard, move it sideways, and watch the Vel X / Vel Y PID traces
+//   in the ground station. The loop's OUTPUT is the angle it wants to command, so it must oppose
+//   the direction you moved. If it agrees with your motion instead, the sign is wrong.
+//
+// WHY IT IS SAFE
+//   flight_control_update() calls flight_control_stop_motors() BEFORE this runs, and returns
+//   immediately after, so no code path between here and the motor driver is reachable. The outer
+//   loop only writes angle_setpoint_* and throttle_command, which are consumed exclusively by the
+//   mid and inner loops - and those do not run. Integrators wound up here are cleared by
+//   flight_control_reset_all_pids() on the way into ARMED, which also clears the two hold latches.
+//
+//   It deliberately does NOT run while the kill latch is set: kill means nothing happens.
+//
+// Set to 0 for competition/demo builds where a disarmed aircraft should compute nothing at all.
+// ---------------------------------------------------------------------------
+#define FLIGHT_CONTROL_MONITOR_WHEN_DISARMED 1
+
+// ---------------------------------------------------------------------------
 // TODO(bench): MOTOR_IDLE_THRUST - MEASURE THIS.
 // The floor the mixer keeps every motor at while armed and above MOTOR_IDLE_THRESHOLD.
 // A coreless motor that is commanded to zero has STOPPED, and a stopped motor produces no
@@ -162,6 +194,14 @@ static portMUX_TYPE control_input_spinlock = portMUX_INITIALIZER_UNLOCKED;
 // Divider counters for the mid and outer loops.
 static uint32_t tick_counter;
 
+#if FLIGHT_CONTROL_MONITOR_WHEN_DISARMED
+// Separate divider for disarmed monitor mode. It cannot share tick_counter, because the disarm
+// path zeroes that one every tick to keep the next arm starting on a clean phase - which would
+// pin the monitor at "tick 0" and run the outer loop at the full 1 kHz with OUTER_LOOP_DT
+// (0.020 s) as its dt. That would make every rate in the published PID trace wrong by 20x.
+static uint32_t monitor_tick_counter;
+#endif
+
 // Setpoints handed down between cascade levels. The mid loop writes the rate setpoints that
 // the inner loop consumes; the outer loop writes the angle setpoints the mid loop consumes.
 static float rate_setpoint_roll, rate_setpoint_pitch, rate_setpoint_yaw;
@@ -171,6 +211,15 @@ static float throttle_command;
 // Altitude hold target, captured when the mode engages.
 static float altitude_setpoint;
 static bool altitude_hold_engaged;
+
+// Whether the body-velocity outer loop is actually driving the angle setpoints right now.
+//
+// Added 2026-08-29. The altitude loop always had this latch; the velocity loop did not, which
+// cost two things. It had no engagement hook, so the VEL_X/VEL_Y integrators were never reset
+// and carried stale windup from a previous engagement into the next one (Ki is 1.5, so that is
+// a real kick, not a rounding error). And it had no disengagement hook, so the drone could fall
+// out of position hold back into angle mode with nothing said about it anywhere.
+static bool position_hold_engaged;
 
 // Last motor commands, for telemetry.
 static float motor_output[MOTOR_COUNT];
@@ -241,6 +290,7 @@ static void flight_control_reset_all_pids(void) {
     angle_setpoint_pitch = 0.0f;
     throttle_command = 0.0f;
     altitude_hold_engaged = false;
+    position_hold_engaged = false;
 }
 
 // Creates all eight PID instances and hands them to the tuning registry.
@@ -572,6 +622,19 @@ static void flight_control_outer_loop(const telemetry_control_payload_t *control
 
     // --- Body velocity -------------------------------------------------------
     if (wants_position_hold && nav != NULL && nav->velocity_valid) {
+        if (!position_hold_engaged) {
+            // Start both velocity loops from a clean integrator, exactly as altitude hold does
+            // above. Without this the integrators resume wherever the previous engagement left
+            // them - the loops simply stop being run when hold drops out, so their state freezes
+            // rather than decaying - and the drone gets an immediate tilt command on re-engage
+            // that has nothing to do with its current motion.
+            pid_reset(&pid_loops[TELEMETRY_LOOP_VEL_X]);
+            pid_reset(&pid_loops[TELEMETRY_LOOP_VEL_Y]);
+            position_hold_engaged = true;
+            ESP_LOGI(TAG, "Position hold engaged (velocity %.2f, %.2f m/s)",
+                     (double)nav->velocity_x, (double)nav->velocity_y);
+        }
+
         // The roll/pitch sticks command a VELOCITY here rather than an angle, so centring
         // them asks for zero velocity, which is what makes the drone hold station.
         // Scale: full stick deflection (+/-1 after the angle mapping) asks for 1 m/s.
@@ -590,6 +653,14 @@ static void flight_control_outer_loop(const telemetry_control_payload_t *control
                                                      velocity_setpoint_y, nav->velocity_y,
                                                      OUTER_LOOP_DT, now_s);
     } else {
+        if (position_hold_engaged) {
+            // The pilot asked for position hold and is no longer getting it. Say so: the sticks
+            // silently change meaning here from "velocity command" to "angle command", and with
+            // them centred that is a level attitude rather than zero motion - so the drone stops
+            // resisting drift the instant this happens, with no other outward sign.
+            ESP_LOGW(TAG, "Position hold disengaged (body velocity no longer valid)");
+            position_hold_engaged = false;
+        }
         // Angle mode: the sticks are the angle setpoints directly.
         angle_setpoint_roll = control->roll_setpoint;
         angle_setpoint_pitch = control->pitch_setpoint;
@@ -647,6 +718,21 @@ static void flight_control_stop_motors(void) {
     memset(motor_output, 0, sizeof(motor_output));
 }
 
+#if FLIGHT_CONTROL_MONITOR_WHEN_DISARMED
+// Disarmed monitor: outer loop only, motors already stopped by the caller.
+// See the long comment at FLIGHT_CONTROL_MONITOR_WHEN_DISARMED for what this is for and why it
+// cannot reach the motors. Runs on its own divider so the outer loop still sees 50 Hz and its
+// OUTER_LOOP_DT stays truthful.
+static void flight_control_monitor_disarmed(const telemetry_control_payload_t *control,
+                                            const nav_state_t *nav,
+                                            float now_s) {
+    if ((monitor_tick_counter % OUTER_LOOP_DIVIDER) == 0) {
+        flight_control_outer_loop(control, nav, now_s);
+    }
+    monitor_tick_counter++;
+}
+#endif
+
 // THE 1 kHz ENTRY POINT. Called from fc_task on core 1, once per tick, and nowhere else.
 //
 // Order of business:
@@ -663,6 +749,11 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     }
 
     const int64_t now_us = esp_timer_get_time();
+
+    // Shared timebase for the PID test-signal injection, taken once so every loop that runs this
+    // tick evaluates the same point on the waveform. Hoisted above the arming machine because the
+    // disarmed monitor path below needs it too.
+    const float now_s = (float)((double)now_us / 1000000.0);
 
     // --- Measured loop rate, for bench verification ---------------------------
     loop_rate_counter++;
@@ -692,6 +783,20 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
         // the file: every path that does not explicitly authorise the motors ends up here.
         flight_control_stop_motors();
         tick_counter = 0;   // restart the dividers so the next arm begins on a clean phase
+
+#if FLIGHT_CONTROL_MONITOR_WHEN_DISARMED
+        // Bench aid: with the motors already stopped above, run the outer loop so its PID
+        // internals reach the ground station. This is how the unverified velocity->angle sign
+        // gets checked with the drone in your hand instead of in the air - see the comment at
+        // FLIGHT_CONTROL_MONITOR_WHEN_DISARMED.
+        //
+        // Not while killed: the kill latch means nothing happens, including this.
+        if (flight_state != FLIGHT_STATE_KILLED) {
+            flight_control_monitor_disarmed(&control, nav, now_s);
+        } else {
+            monitor_tick_counter = 0;
+        }
+#endif
         return;
     }
 
@@ -713,9 +818,8 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     // (counter == 0) runs all three loops. Otherwise throttle_command would still be the 0 left
     // by the reset for the first 20 ticks, and the mixer's idle floor would spin the motors on
     // a throttle the pilot never commanded.
-    // Shared timebase for the test-signal injection, taken once so all three loops evaluate the
-    // same point on the waveform within one tick.
-    const float now_s = (float)((double)now_us / 1000000.0);
+    // now_s (the shared test-signal timebase) is taken at the top of this function, so the
+    // disarmed monitor path and the armed cascade both evaluate the same waveform the same way.
 
     if ((tick_counter % OUTER_LOOP_DIVIDER) == 0) {
         flight_control_outer_loop(&control, nav, now_s);
@@ -766,7 +870,26 @@ void flight_control_get_status(telemetry_status_payload_t *out) {
 
     out->loop_hz = measured_loop_hz;
     out->armed = (flight_state == FLIGHT_STATE_ARMED) ? 1 : 0;
-    out->flight_mode = control_input.flight_mode;
+
+    // The mode ACTUALLY IN EFFECT, not the one the pilot asked for.
+    //
+    // Fixed 2026-08-29: this used to report control_input.flight_mode straight back, i.e. the
+    // request. telemetry_uart.h has always documented this field as "actually in effect (may
+    // differ from requested)", and the dashboard renders it as the Mode tile - so when an outer
+    // loop dropped out, the tile kept saying POS HOLD while the drone was really flying angle
+    // mode. That is the single worst thing for this field to be wrong about: the pilot loses
+    // position hold and the instrument that exists to tell them still reads POS HOLD.
+    //
+    // Derived from the engagement latches rather than the request, so it cannot drift out of
+    // step with what the outer loops are doing. The ALT_VALID / VEL_VALID flags below say
+    // whether the sensors are healthy; this says whether the loops are actually running.
+    if (position_hold_engaged) {
+        out->flight_mode = TELEMETRY_MODE_POS_HOLD;
+    } else if (altitude_hold_engaged) {
+        out->flight_mode = TELEMETRY_MODE_ALT_HOLD;
+    } else {
+        out->flight_mode = TELEMETRY_MODE_ANGLE;
+    }
 
     out->flags = 0;
     if (link_ok)               out->flags |= TELEMETRY_STATUS_FLAG_LINK_OK;

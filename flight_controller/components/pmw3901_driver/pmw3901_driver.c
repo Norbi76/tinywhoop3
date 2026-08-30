@@ -46,11 +46,26 @@
 static const char *TAG = "PMW3901";
 
 // ---------------------------------------------------------------------------
-// TODO(pins): CONFIRM AGAINST YOUR WIRING.
-// Already taken elsewhere: GPIO 11/12 (IMU I2C), GPIO 4/5/1/2 (motors - motor_driver.c is the
-// authority on that list),
-// GPIO 13 (VL53L1X XSHUT), GPIO 6/7 (telemetry UART, see main.c).
-// Avoid the strapping pins (0, 3, 45, 46) and the USB-JTAG pins (19, 20).
+// PINS CONFIRMED AGAINST THE AIRFRAME WIRING (2026-08-29). Verified by grep against the
+// drivers themselves, not against a copied list - that list had drifted stale once before.
+//
+//   GPIO 1, 2, 4, 5   motors (RL, RR, FL, FR)      motor_driver.c:34-37
+//   GPIO 6, 7         telemetry UART TX/RX          main.c:389-390
+//   GPIO 11, 12       I2C SCL/SDA (IMU + ToF)       imu_driver.c:34-35
+//   GPIO 13           VL53L1X XSHUT                 vl53l1x_driver.c:52
+//   GPIO 8, 9, 10, 18 optical flow SPI              here
+//
+// >>> GPIO 18 IS NOT ON THE SUPER MINI'S SIDE HEADER. <<<
+// The board only breaks out GPIO 1-13 on the side castellations, which is why every other
+// peripheral above lives in that range. SCLK is soldered to an UNDERSIDE PAD. That joint has
+// no strain relief and is the mechanically weakest connection on the aircraft.
+//
+// A lifted MISO pad reads as a floating line - constant 0x00 or 0xFF - which is exactly what
+// the dual product-ID check in pmw3901_init() exists to catch. If the sensor stops identifying
+// after a crash, suspect the solder joint before the code.
+//
+// Avoid, if these ever move: strapping pins (0, 3, 45, 46), USB (19, 20), SPI flash (26-32),
+// UART0 console (43, 44), onboard RGB LED (48).
 // ---------------------------------------------------------------------------
 // Each is #ifndef-guarded so a BENCH HARNESS can override it from its own CMakeLists with
 // target_compile_definitions, without editing (and having to un-edit) this file. The drone build

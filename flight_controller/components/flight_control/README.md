@@ -177,6 +177,52 @@ Every path that does not *explicitly* authorise the motors ends up here. Structu
 single early return — rather than scattering conditionals through the cascade — is what makes
 "disarmed means stopped" auditable.
 
+## Disarmed monitor mode
+
+`FLIGHT_CONTROL_MONITOR_WHEN_DISARMED` (default 1) runs the **outer loop only** while disarmed,
+after the motors have already been stopped by the invariant above and before the early return. No
+mid loop, no inner loop, no mixer, no motor write — the outer loop's only outputs are
+`angle_setpoint_*` and `throttle_command`, and nothing that consumes those is running.
+
+It exists to make the **unverified velocity→angle sign checkable without flying**. A wrong sign
+there is positive feedback: the drone accelerates away from the hold point instead of settling.
+Before this, the only way to find out was to engage position hold in the air.
+
+### The bench procedure
+
+Props off, drone powered, **disarmed**, ground station connected, PID tab on `Vel X` (then
+`Vel Y`). Hold the drone 20–50 cm above a textured floor — on a desk the ToF sits outside its
+0.03–1.30 m window, so `altitude_valid` is false and nothing computes. Press **HOLD** on the
+dashboard, move the drone by hand, and read the published `output`:
+
+| Move the drone | Loop | `output` must be | Because |
+|---|---|---|---|
+| Forward | `Vel X` | **negative** | negated at the call site → positive pitch = nose up = decelerate |
+| Right | `Vel Y` | **negative** | used directly → negative roll = left wing down = decelerate |
+
+The rule is the same for both axes: **move in the positive direction, the output goes negative.**
+If it goes positive, that axis' sign is wrong, and in flight it is positive feedback.
+
+> ⚠ `Vel X` is negated *after* `flight_control_run_pid()` returns, so the `output` in the PID trace
+> is the value **before** negation. `Vel Y` is not negated. Read the table, not your intuition.
+
+The Mode tile is live here too: it reads `POS HOLD` only when the loops genuinely engaged, so this
+doubles as a way to see whether hold *would* engage at all without leaving the ground.
+
+### Why it cannot reach the motors
+
+`flight_control_stop_motors()` is called before it, and the function returns immediately after, so
+no code path between the monitor and the motor driver is reachable. Integrators wound up while
+monitoring are cleared by `flight_control_reset_all_pids()` on the way into `ARMED`, which also
+clears both hold latches. It does not run while the kill latch is set.
+
+It uses its own `monitor_tick_counter` rather than `tick_counter`, because the disarm path zeroes
+that one every tick — sharing it would pin the monitor at "tick 0", running the outer loop at the
+full 1 kHz while still passing `OUTER_LOOP_DT` (0.020 s) as its `dt` and making every rate in the
+published trace wrong by 20×.
+
+Set the macro to 0 for a build where a disarmed aircraft computes nothing at all.
+
 ### Idle cutoff
 
 Armed but throttle below `MOTOR_IDLE_THRESHOLD` (0.05), and not in altitude hold: motors off,

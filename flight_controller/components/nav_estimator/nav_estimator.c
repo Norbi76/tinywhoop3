@@ -23,11 +23,20 @@
 // TWO CONSTANTS/CONVENTIONS IN HERE ARE UNVERIFIED AND BOTH MATTER:
 //   FLOW_COUNTS_PER_RAD (a guess) and the gyro-compensation axis pairing/signs. See the TODO and
 //   the bench procedure inline below, and README.md.
+//
+// 2026-08-29: the flow sensor is now physically wired to the airframe (SPI on GPIO 18/8/9/10,
+// SCLK on an underside pad). Two changes went in with it:
+//   - the velocity limiter no longer freezes velocity_valid TRUE on a stale sample (see BUGFIX
+//     at the limiter), and
+//   - nav_flow_log() prints squal/deltas/velocity and the reason velocity_valid dropped, over
+//     USB serial, because squal is not carried in the 50 Hz status frame and the ground station
+//     therefore cannot show it. Turn NAV_FLOW_LOG_ENABLED off once the sensor is characterised.
 
 #include "nav_estimator.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #ifndef M_PI
@@ -166,11 +175,61 @@ void nav_estimator_update_range(const vl53l1x_result_t *range, float roll_deg, f
     last_good_range_us = now_us;
 }
 
+// ---------------------------------------------------------------------------
+// BENCH DIAGNOSTIC (2026-08-29).
+//
+// The flow sensor has never run against real hardware and FLOW_COUNTS_PER_RAD is still a guess,
+// so the first job on the bench is watching what the sensor actually reports - not flying on it.
+// This prints one line every NAV_FLOW_LOG_DIVIDER calls of nav_estimator_update_flow(), i.e.
+// every 0.5 s at the sensor task's 100 Hz, over the USB serial console.
+//
+// It exists because `squal` never leaves the flight controller: it is not in the 50 Hz status
+// frame, so the ground station cannot show it, and pmw3901_driver's README asks you to find the
+// real PMW3901_MIN_SQUAL by logging squal over the surfaces you actually fly over. This is that
+// log. The "reason" field tells you WHICH gate dropped velocity_valid, which is otherwise
+// invisible - a false flag looks identical whether the floor is featureless, the ToF dropped
+// out, or the scale factor is saturating the limiter.
+//
+// SET THIS TO 0 ONCE THE SENSOR IS CHARACTERISED. It is a bench aid, not flight instrumentation.
+// ---------------------------------------------------------------------------
+#define NAV_FLOW_LOG_ENABLED 1
+#define NAV_FLOW_LOG_DIVIDER 50
+
+#if NAV_FLOW_LOG_ENABLED
+static uint32_t flow_log_counter;
+
+static void nav_flow_log(const pmw3901_motion_t *flow, float raw_vx, float raw_vy, const char *reason) {
+    if ((flow_log_counter++ % NAV_FLOW_LOG_DIVIDER) != 0) {
+        return;
+    }
+    if (flow == NULL) {
+        ESP_LOGI(TAG, "flow: NO READ (SPI failed or sensor absent) | alt %.2f alt_ok %d | %s",
+                 (double)state.altitude, (int)state.altitude_valid, reason);
+        return;
+    }
+    ESP_LOGI(TAG, "flow: dx %6d dy %6d squal %3u mot %d | alt %.2f alt_ok %d | raw v %+6.2f %+6.2f "
+                  "| filt v %+6.2f %+6.2f | vel_ok %d | %s",
+             flow->delta_x, flow->delta_y, (unsigned)flow->squal, (int)flow->motion,
+             (double)state.altitude, (int)state.altitude_valid,
+             (double)raw_vx, (double)raw_vy,
+             (double)state.velocity_x, (double)state.velocity_y,
+             (int)state.velocity_valid, reason);
+}
+#else
+static inline void nav_flow_log(const pmw3901_motion_t *flow, float raw_vx, float raw_vy, const char *reason) {
+    (void)flow; (void)raw_vx; (void)raw_vy; (void)reason;
+}
+#endif
+
 void nav_estimator_update_flow(const pmw3901_motion_t *flow, float roll_rate_dps, float pitch_rate_dps, float dt) {
     const int64_t now_us = esp_timer_get_time();
 
     // --- Gate 1: usable flow reading over a surface with enough texture? -----
     if (flow == NULL || !flow->valid) {
+        // Two very different failures share this gate, so name them apart in the log: a failed
+        // SPI read (bad solder joint, wrong pin) versus a floor with too little texture.
+        nav_flow_log(flow, 0.0f, 0.0f,
+                     flow == NULL ? "READ FAILED" : "LOW SQUAL - featureless surface");
         if ((now_us - last_good_flow_us) > FLOW_TIMEOUT_US) {
             state.velocity_valid = false;
         }
@@ -181,7 +240,13 @@ void nav_estimator_update_flow(const pmw3901_motion_t *flow, float roll_rate_dps
     // Flow is an ANGULAR rate. The same angular rate means 10 cm/s at 20 cm altitude and
     // 50 cm/s at 1 m. Without a trusted altitude the velocity number is meaningless, so we
     // refuse to produce one rather than emit a plausible-looking wrong value.
+    //
+    // Note for the bench: on a desk the ToF is usually closer than MIN_VALID_ALTITUDE_M (3 cm)
+    // or beyond MAX_VALID_ALTITUDE_M (1.30 m), so altitude_valid is false and you will see this
+    // reason constantly. Hold the drone 20-50 cm over the floor for the hand test, or the flow
+    // numbers never get computed at all.
     if (!state.altitude_valid || dt <= 0.0f) {
+        nav_flow_log(flow, 0.0f, 0.0f, "NO ALTITUDE - ToF invalid, velocity cannot be scaled");
         state.velocity_valid = false;
         return;
     }
@@ -218,8 +283,23 @@ void nav_estimator_update_flow(const pmw3901_motion_t *flow, float roll_rate_dps
     const float raw_velocity_y = (translation_y_rad / dt) * state.altitude;
 
     // Reject obvious nonsense before it reaches the filter. An indoor whoop is not doing 5 m/s.
+    //
+    // BUGFIX 2026-08-29: this used to be a bare `return`, which skipped the timeout logic and
+    // therefore left velocity_valid TRUE with velocity_x/y FROZEN at their last good values.
+    // That is precisely the failure this file's header says the design avoids - the outer loop
+    // would keep steering on a stale velocity indefinitely while the sensor produced garbage.
+    //
+    // It also hid the most likely symptom of a badly wrong FLOW_COUNTS_PER_RAD: if the constant
+    // is far too small every sample saturates the limiter, so the one case that most needed to
+    // disengage the velocity loop was the one case that silently kept it engaged.
+    //
+    // Now a saturating sample falls through the same 200 ms timeout as a failed read.
     const float velocity_limit = 5.0f;
     if (fabsf(raw_velocity_x) > velocity_limit || fabsf(raw_velocity_y) > velocity_limit) {
+        nav_flow_log(flow, raw_velocity_x, raw_velocity_y, "SATURATED");
+        if ((now_us - last_good_flow_us) > FLOW_TIMEOUT_US) {
+            state.velocity_valid = false;
+        }
         return;
     }
 
@@ -231,6 +311,8 @@ void nav_estimator_update_flow(const pmw3901_motion_t *flow, float roll_rate_dps
 
     state.velocity_valid = true;
     last_good_flow_us = now_us;
+
+    nav_flow_log(flow, raw_velocity_x, raw_velocity_y, "ok");
 }
 
 void nav_estimator_get(nav_state_t *out) {

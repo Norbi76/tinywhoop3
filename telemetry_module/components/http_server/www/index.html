@@ -135,6 +135,14 @@ summary{cursor:pointer;font-size:12px;color:#8fa3c0;text-transform:uppercase;let
   <div class="stat"><div class="k">Pitch</div><div class="v" id="s_pitch">-</div></div>
   <div class="stat"><div class="k">Yaw</div><div class="v" id="s_yaw">-</div></div>
   <div class="stat"><div class="k">Alt</div><div class="v" id="s_alt">-</div></div>
+  <!-- Body-frame velocity from the optical flow sensor. The backend has always sent vx/vy and
+       vel_valid in /api/status; nothing rendered them, so position hold could be engaged with
+       no way to see whether the estimate was sane. These two tiles are that view.
+       Vel X = forward, Vel Y = right. Both read n/a whenever vel_valid is false, exactly like
+       Alt does - a stale number here is far worse than no number, because it is the input the
+       velocity loop steers on. -->
+  <div class="stat"><div class="k">Vel X (fwd)</div><div class="v" id="s_vx">-</div></div>
+  <div class="stat"><div class="k">Vel Y (right)</div><div class="v" id="s_vy">-</div></div>
   <!-- The flight controller has no ADC divider on the pack: flight_control.c reports a fixed
        nominal 3.8 V. Labelled and dimmed so it can never be mistaken for a real gauge. -->
   <div class="stat"><div class="k">Batt (nom)</div><div class="v dim" id="s_batt">-</div></div>
@@ -546,6 +554,18 @@ function refresh() {
     setText('s_pitch', d.pitch.toFixed(1) + '°');
     setText('s_yaw', d.yaw.toFixed(1) + '°');
     setText('s_alt', d.alt_valid ? d.altitude.toFixed(2) + ' m' : 'n/a');
+
+    // Optical flow velocity. Gated on vel_valid for the same reason Alt is gated on alt_valid:
+    // when the estimate is not trustworthy the honest display is "n/a", not the last good value
+    // frozen on screen looking healthy.
+    //
+    // The Mode tile above tells you whether the velocity loop is RUNNING (the flight controller
+    // now reports the mode actually in effect, not the one requested); these two tell you what
+    // it would be running ON. Watch them before pressing HOLD - if they are not near zero with
+    // the drone sitting still, do not engage.
+    setText('s_vx', d.vel_valid ? d.vx.toFixed(2) + ' m/s' : 'n/a');
+    setText('s_vy', d.vel_valid ? d.vy.toFixed(2) + ' m/s' : 'n/a');
+
     // Nominal, not measured - see the tile's comment above and flight_control.c.
     setText('s_batt', d.battery.toFixed(2) + ' V');
     setText('s_trim', Math.round(d.throttle_trim * 100) + '%');

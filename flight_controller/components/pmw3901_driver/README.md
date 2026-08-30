@@ -38,7 +38,28 @@ upstream. Everything else in this component is project code.
 | Mode | SPI mode 3 (CPOL=1, CPHA=1) — PixArt requirement |
 | Clock | 2 MHz maximum — PixArt requirement |
 
-All pins are `TODO(pins)` placeholders.
+**Pins confirmed against the airframe wiring, 2026-08-29.** No longer placeholders. The full
+allocation, verified by reading the drivers rather than a copied list:
+
+| GPIO | Owner | Authority |
+|---|---|---|
+| 1, 2, 4, 5 | Motors (RL, RR, FL, FR) | `motor_driver.c:34-37` |
+| 6, 7 | Telemetry UART TX/RX | `main.c:389-390` |
+| 11, 12 | I²C SCL/SDA (IMU + ToF) | `imu_driver.c:34-35` |
+| 13 | VL53L1X XSHUT | `vl53l1x_driver.c:52` |
+| 8, 9, 10, 18 | Optical flow SPI | this component |
+
+### ⚠ SCLK is on an underside pad
+
+The ESP32-S3 Super Mini only breaks out **GPIO 1–13** on its side castellations — which is why
+every other peripheral above lives in that range; there were no side pins left. GPIO 18 is
+soldered to a **pad on the underside of the board**.
+
+That joint has no strain relief and is the mechanically weakest electrical connection on the
+aircraft. A lifted MISO or SCLK pad presents as a floating line — a constant `0x00` or `0xFF` —
+which is exactly what the dual product-ID check catches at init. **If the sensor stops
+identifying after a crash, suspect the solder joint before the code.** Hot-glue the wires down
+once the ID check passes.
 
 All five (`PMW3901_SPI_HOST` plus the four GPIOs) are `#ifndef`-guarded, so a bench harness can
 override them from its own build without editing this component. `../../../flow_calibration/`
@@ -47,10 +68,10 @@ none of them and compiles identically to before the guards existed. Note the asy
 ToF: `vl53l1x_driver` *borrows* an I²C bus so its caller picks the pins at runtime, whereas this
 component *creates* its SPI bus, so the pins can only be chosen at compile time.
 
-> **Note:** the `TODO(pins)` block in the source lists which GPIOs are already taken elsewhere.
-> That list is a convenience copy and had drifted out of date once already — treat
-> `motor_driver.c`, `imu_driver.c` and `main.c` as authoritative for their own pins. Every pin set
-> in this project is still unconfirmed.
+> **Note:** the pin block in the source lists which GPIOs are taken elsewhere. That list is a
+> convenience copy and had drifted out of date once already — treat `motor_driver.c`,
+> `imu_driver.c` and `main.c` as authoritative for their own pins. The list above was
+> re-verified against those files on 2026-08-29.
 
 ### Why chip select is manual
 
@@ -116,6 +137,13 @@ to mean anything, and `nav_estimator` gates velocity out. **40 is a guess** (`TO
 the real threshold by flying low over the surfaces you actually plan to shoot over and logging
 `squal`.
 
+**`squal` is not in the 50 Hz status frame**, so the ground station cannot plot it and the flight
+logs do not contain it. To make that threshold findable at all, `nav_estimator.c` now prints
+`squal` (with the deltas, the raw and filtered velocities, and *which gate* dropped
+`velocity_valid`) to the USB serial console at 2 Hz — see `NAV_FLOW_LOG_ENABLED` there. Turn it
+off once the sensor is characterised, or promote `squal` into the status payload if you want it
+in the flight logs instead.
+
 ### Identity check uses both IDs
 
 `PRODUCT_ID` must be `0x49` **and** `INVERSE_PRODUCT_ID` must be `0xB6`. Checking both catches a
@@ -141,10 +169,10 @@ could pass a single-ID check by accident.
 
 | Marker | What must be done |
 |---|---|
-| **Never run on hardware** | The whole driver, including the new init sequence, is untested against a real sensor. |
+| **Never run on hardware** | The whole driver, including the init sequence, is still untested against a real sensor. The product-ID check passing is the first milestone. |
 | `TODO(datasheet)` | Confirm the SPI delays against a PixArt datasheet. They now match Bitcraze's working values, but no datasheet exists in `documents/`. |
-| `TODO(pins)` | SPI pins 18/8/9/10 against actual wiring. |
-| `TODO(bench)` | `PMW3901_MIN_SQUAL = 40` against real surfaces. |
+| ~~`TODO(pins)`~~ | **Done 2026-08-29.** SPI pins 18/8/9/10 confirmed against the airframe; SCLK is on an underside pad. |
+| `TODO(bench)` | `PMW3901_MIN_SQUAL = 40` against real surfaces. The 2 Hz serial log in `nav_estimator.c` is how you read `squal` to do this. |
 
 Related, in `nav_estimator`: `FLOW_COUNTS_PER_RAD` is also unmeasured, and the gyro-compensation
 axis pairing and signs are unverified. **All of these must be right before velocity readings mean
