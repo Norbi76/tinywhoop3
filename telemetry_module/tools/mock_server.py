@@ -8,9 +8,10 @@ an ESP32 or having a flight controller attached.
 It is not just a stub: it reimplements the parts of the firmware whose behaviour the dashboard
 actually reacts to.
 
-  * control_state.c   - the ramp-on-hold / decay-on-release setpoint integration, the throttle
-                        trim with no decay, the 500 ms input watchdog and the 3 s disarm
-                        backstop. Held buttons therefore feel the same here as on the drone.
+  * control_state.c   - the analogue joystick for roll/pitch (expo + slew limit off jx/jy), the
+                        ramp-on-hold / decay-on-release yaw axis, the throttle trim with no decay
+                        branch, the 500 ms input watchdog and the 3 s disarm backstop. The stick
+                        and the held buttons therefore feel the same here as on the drone.
   * flight_control.c  - the arming gate (attitude must have settled) and the latching kill,
                         which only clears on an explicit disarm.
   * the flight controller itself - a crude but plausible rigid-body sim, so roll/pitch/yaw,
@@ -37,7 +38,8 @@ the controls instead of being a still image.
 
 LAYOUT OF THIS FILE
     constants mirrored from telemetry_uart.h and control_state.c   (marked with comments)
-    ramp_towards / update_axis  - line-for-line copies of the firmware helpers
+    ramp_towards / update_axis / apply_expo / stick_to_angle
+                                - line-for-line copies of the firmware helpers
     DroneSim                    - setpoint integration, watchdogs, arming, the rigid-body sim
     png_encode / render_preview - the synthetic viewfinder, stdlib zlib only
     MockHandler                 - every /api/* endpoint plus the /mock/* fault injection
@@ -76,17 +78,29 @@ LOOP_NAMES = [
 ]
 
 # --- Mirrored from components/control_state/control_state.c --------------------------------
-MAX_ROLL_PITCH_DEG = 15.0
+MAX_ROLL_PITCH_DEG = 10.0
 MAX_YAW_RATE_DPS = 90.0
-ROLL_PITCH_RAMP_DPS = 45.0
-ROLL_PITCH_DECAY_DPS = 90.0
-# Immediate step applied to roll/pitch on the edge of a new press, so FWD/BACK/LEFT/RIGHT respond
-# on the first frame rather than ramping up out of nothing. Roll and pitch only - yaw and the
-# throttle trim stay pure ramps. See the comment at ROLL_PITCH_KICK_DEG in control_state.c.
-ROLL_PITCH_KICK_DEG = 5.0
+
+# ROLL / PITCH ARE AN ANALOGUE JOYSTICK (2026-08-29), not buttons.
+# The dashboard posts normalised displacement as jx/jy and the firmware owns the feel: expo,
+# the degree limit, and a slew limit. There is no ramp, no decay and no press edge - the stick
+# position IS the command, so centring the stick centres the setpoint.
+#   expo:  out = (1 - E) * x + E * x^3, applied before scaling to degrees.
+#          30% stick -> 1.4 deg, 50% -> 2.8 deg, 100% -> 10 deg.
+#   slew:  bounds how fast the commanded angle may move. A thumb cannot move faster than this,
+#          so it is invisible in normal use; it exists so a corrupt jx/jy cannot step the
+#          setpoint across full scale in one frame, and so the browser watchdog zeroing the
+#          stick eases back to level instead of snapping.
+ROLL_PITCH_EXPO = 0.60
+ROLL_PITCH_SLEW_DPS = 120.0
+
+# Yaw keeps its buttons: it commands a RATE, which is a "point it and leave it" control rather
+# than something aimed continuously. Decay is 2x ramp, so releasing settles faster than pressing
+# moved it.
 YAW_RAMP_DPS2 = 180.0
 YAW_DECAY_DPS2 = 360.0
-THROTTLE_TRIM_RATE_PER_S = 0.25
+
+THROTTLE_TRIM_RATE_PER_S = 0.1
 THROTTLE_MAX = 0.85
 INPUT_TIMEOUT_S = 0.5
 DISARM_TIMEOUT_S = 3.0
@@ -130,25 +144,21 @@ def update_axis(current, positive_held, negative_held, limit, ramp_rate, decay_r
     return ramp_towards(current, target, ramp_rate, dt)
 
 
-def apply_press_kick(current, positive_held, negative_held, positive_was, negative_was, kick):
-    """Step the axis to +/-kick the instant it acquires a NEW commanded direction.
+def apply_expo(x, expo):
+    """Expo curve for the joystick: fine near centre, full authority at the edge.
 
-    Fires on the edge, not while the button is held, and only ever moves the axis further in the
-    commanded direction. Line-for-line mirror of apply_press_kick() in control_state.c.
+    Mirror of apply_expo() in control_state.c.
     """
-    commanded_positive = positive_held and not negative_held
-    commanded_negative = negative_held and not positive_held
-    was_positive = positive_was and not negative_was
-    was_negative = negative_was and not positive_was
+    return ((1.0 - expo) * x) + (expo * x * x * x)
 
-    if commanded_positive and not was_positive:
-        if current < kick:
-            current = kick
-    elif commanded_negative and not was_negative:
-        if current > -kick:
-            current = -kick
 
-    return current
+def stick_to_angle(current_deg, stick, dt):
+    """One normalised stick axis -> a commanded angle, slew-limited from its previous value.
+
+    Mirror of stick_to_angle() in control_state.c.
+    """
+    target_deg = apply_expo(clamp(stick, -1.0, 1.0), ROLL_PITCH_EXPO) * MAX_ROLL_PITCH_DEG
+    return ramp_towards(current_deg, target_deg, ROLL_PITCH_SLEW_DPS, dt)
 
 
 class DroneSim:
@@ -166,8 +176,10 @@ class DroneSim:
 
             # Pilot request state (control_state.c)
             self.buttons = {key: False for key in BUTTON_KEYS}
-            # Previous tick's buttons, for the press-edge detection that fires the roll/pitch kick.
-            self.prev_buttons = {key: False for key in BUTTON_KEYS}
+            # Latest joystick displacement, [-1, +1] each, already clamped to the unit disc by
+            # set_stick(). Zeroed by the browser watchdog exactly like the buttons are.
+            self.stick_x = 0.0
+            self.stick_y = 0.0
             self.roll_sp = 0.0
             self.pitch_sp = 0.0
             self.yaw_rate_sp = 0.0
@@ -217,6 +229,32 @@ class DroneSim:
                 self.buttons[key] = bool(buttons.get(key, False))
             self.last_input_t = time.monotonic()
             self.inputs_released = False
+
+    def set_stick(self, x, y):
+        """Mirror of control_state_set_stick(): reject non-finite, clamp per axis, clamp to disc.
+
+        Deliberately does NOT touch last_input_t - set_buttons() owns the browser watchdog and is
+        called from the same POST, so there is exactly one place where "the browser is alive" is
+        decided.
+        """
+        if not math.isfinite(x):
+            x = 0.0
+        if not math.isfinite(y):
+            y = 0.0
+
+        x = clamp(x, -1.0, 1.0)
+        y = clamp(y, -1.0, 1.0)
+
+        # The unit DISC, not the unit square. A full diagonal push is sqrt(2) long and would
+        # otherwise command 1.41x the tilt of a straight push on each axis.
+        magnitude = math.sqrt(x * x + y * y)
+        if magnitude > 1.0:
+            x /= magnitude
+            y /= magnitude
+
+        with self.lock:
+            self.stick_x = x
+            self.stick_y = y
 
     def set_arm(self, armed):
         with self.lock:
@@ -291,34 +329,26 @@ class DroneSim:
                 if not self.inputs_released:
                     print("[sim] browser stopped posting - releasing directional inputs")
                     self.inputs_released = True
+                # Every button released AND the stick centred. The axes then return to neutral
+                # through the normal path below - the yaw decay and the roll/pitch slew limit -
+                # rather than snapping to zero, so the drone levels out smoothly.
                 for key in BUTTON_KEYS:
                     self.buttons[key] = False
+                self.stick_x = 0.0
+                self.stick_y = 0.0
                 if self.last_input_t and input_age > DISARM_TIMEOUT_S and self.arm_request:
                     print("[sim] browser gone for >3 s - dropping arm request")
                     self.arm_request = False
                     self.throttle_trim = 0.0
 
             # --- Setpoint integration ----------------------------------------------------
-            # Roll and pitch get the press kick first, then the ramp, in the same tick.
-            self.roll_sp = apply_press_kick(self.roll_sp,
-                                            self.buttons["roll_right"], self.buttons["roll_left"],
-                                            self.prev_buttons["roll_right"],
-                                            self.prev_buttons["roll_left"],
-                                            ROLL_PITCH_KICK_DEG)
-            self.roll_sp = update_axis(self.roll_sp,
-                                       self.buttons["roll_right"], self.buttons["roll_left"],
-                                       MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS,
-                                       ROLL_PITCH_DECAY_DPS, dt)
-            self.pitch_sp = apply_press_kick(self.pitch_sp,
-                                             self.buttons["pitch_forward"],
-                                             self.buttons["pitch_back"],
-                                             self.prev_buttons["pitch_forward"],
-                                             self.prev_buttons["pitch_back"],
-                                             ROLL_PITCH_KICK_DEG)
-            self.pitch_sp = update_axis(self.pitch_sp,
-                                        self.buttons["pitch_forward"], self.buttons["pitch_back"],
-                                        MAX_ROLL_PITCH_DEG, ROLL_PITCH_RAMP_DPS,
-                                        ROLL_PITCH_DECAY_DPS, dt)
+            # Roll and pitch come straight from the joystick: no ramp, no decay, no kick, no edge
+            # detection. All this does is shape the stick position (expo), scale it to degrees,
+            # and bound how fast it may move.
+            self.roll_sp = stick_to_angle(self.roll_sp, self.stick_x, dt)
+            self.pitch_sp = stick_to_angle(self.pitch_sp, self.stick_y, dt)
+
+            # Yaw: same treatment as before, because the axis is a rate rather than an angle.
             self.yaw_rate_sp = update_axis(self.yaw_rate_sp,
                                            self.buttons["yaw_right"], self.buttons["yaw_left"],
                                            MAX_YAW_RATE_DPS, YAW_RAMP_DPS2, YAW_DECAY_DPS2, dt)
@@ -329,12 +359,25 @@ class DroneSim:
             elif self.buttons["throttle_down"] and not self.buttons["throttle_up"]:
                 self.throttle_trim -= THROTTLE_TRIM_RATE_PER_S * dt
             self.throttle_trim = clamp(self.throttle_trim, 0.0, THROTTLE_MAX)
-            if not self.arm_request:
+
+            # Trim must be zero whenever the drone is not actually flying (bugfix 2026-08-29).
+            # Testing only `not arm_request` left a lockout the pilot could walk into and never get
+            # out of: press ARM, the trim stops being zeroed even though the FC has not armed;
+            # press ALT+ because nothing happened; the trim climbs above the FC's arming threshold;
+            # arming is now refused permanently and more ALT+ makes it worse.
+            #
+            # So test the FLIGHT CONTROLLER's own armed flag instead of the pilot's request. Here
+            # self.armed is the sim's stand-in for that flag - last tick's value, exactly as the
+            # firmware reads a status frame that already arrived. `link_up` stands in for the
+            # firmware's freshness test: a STALE status must not count as disarmed, or a status
+            # dropout mid-flight would cut the throttle of a drone that is still flying.
+            fc_reports_disarmed = self.link_up and not self.armed
+            if not self.arm_request or fc_reports_disarmed:
                 self.throttle_trim = 0.0
 
-            # Edge reference for the next tick. Last, so the watchdog's synthesised release above
-            # is remembered as a release and the browser coming back counts as a fresh press.
-            self.prev_buttons = dict(self.buttons)
+            # (The prev_buttons edge reference that used to live here went with the press-kick.
+            # Nothing in this integration is edge-triggered any more: yaw and throttle care only
+            # about what is held right now, and roll/pitch read an absolute stick position.)
 
             # --- Arming gate ---------------------------------------------------------------
             if self.killed:
@@ -450,6 +493,7 @@ class DroneSim:
             return {
                 "uptime_s": round(time.monotonic() - self.t0, 1),
                 "buttons": dict(self.buttons),
+                "stick": {"x": round(self.stick_x, 3), "y": round(self.stick_y, 3)},
                 "setpoints": {
                     "roll": round(self.roll_sp, 2),
                     "pitch": round(self.pitch_sp, 2),
@@ -662,6 +706,14 @@ class MockHandler(BaseHTTPRequestHandler):
 
         if path == "/api/input":
             self.sim.set_buttons(body)
+            # Analogue joystick for roll and pitch. Defaulting to 0 is the important part: an
+            # older client, or a truncated POST, then commands CENTRE rather than silently
+            # holding the last stick position. Missing input must mean "level", never "carry on".
+            # Sanitising happens in set_stick(), because the firmware must not trust a client.
+            jx = body.get("jx", 0.0)
+            jy = body.get("jy", 0.0)
+            self.sim.set_stick(float(jx) if isinstance(jx, (int, float)) else 0.0,
+                               float(jy) if isinstance(jy, (int, float)) else 0.0)
             self._send_json({"ok": True})
             return
 

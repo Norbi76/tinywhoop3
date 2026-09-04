@@ -58,7 +58,7 @@ static const char *TAG = "VL53L1X";
 // once, and put the value it returns here. Leaving it at 0 typically costs a couple of
 // centimetres of absolute altitude accuracy, which matters for altitude hold.
 // ---------------------------------------------------------------------------
-#define VL53L1X_OFFSET_MM 0
+#define VL53L1X_OFFSET_MM 22
 
 // Short distance mode: ~1.3 m ceiling but far better immunity to ambient IR. Correct choice
 // for an indoor drone flying low over a floor. Long mode would reach 4 m but is unusable

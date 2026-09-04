@@ -99,6 +99,28 @@ h1{font-size:16px;margin:0 0 8px}
 .btn.held{background:#2563eb;border-color:#3b82f6}
 .pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
 .pad .sp{visibility:hidden}
+
+/* --- Pitch/roll joystick ---
+   touch-action:none is load-bearing, not cosmetic: without it the browser claims the drag as a
+   page scroll or a pull-to-refresh, the pointer events stop arriving mid-flight, and the stick
+   silently latches at wherever it was when the gesture was stolen. */
+.stickwrap{display:flex;justify-content:center}
+.stick{position:relative;width:min(70vw,260px);height:min(70vw,260px);
+       background:#0c1526;border:1px solid #1e2b45;border-radius:50%;
+       touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab}
+.stick.active{cursor:grabbing;border-color:#3b82f6}
+/* Inner ring marks full deflection - the knob centre stops here. */
+.stick-ring{position:absolute;inset:12%;border:1px dashed #24344f;border-radius:50%;
+            pointer-events:none}
+.stick-cross-h{position:absolute;left:8%;right:8%;top:50%;height:1px;background:#1a2740;
+               pointer-events:none}
+.stick-cross-v{position:absolute;top:8%;bottom:8%;left:50%;width:1px;background:#1a2740;
+               pointer-events:none}
+.stick-knob{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;
+            background:#2563eb;border:2px solid #60a5fa;border-radius:50%;
+            box-shadow:0 2px 10px rgba(0,0,0,.5);pointer-events:none;
+            transition:background .12s ease}
+.stick.active .stick-knob{background:#3b82f6}
 .group{background:#101a2e;border:1px solid #1e2b45;border-radius:12px;padding:10px;margin-bottom:10px}
 .group h2{font-size:12px;color:#8fa3c0;text-transform:uppercase;letter-spacing:.08em;margin:0 0 8px}
 .half{display:grid;grid-template-columns:1fr 1fr;gap:6px}
@@ -151,19 +173,25 @@ summary{cursor:pointer;font-size:12px;color:#8fa3c0;text-transform:uppercase;let
   <div class="stat"><div class="k">Photos</div><div class="v" id="s_shots">-</div></div>
 </div>
 
-<!-- Pitch / roll pad -->
+<!-- Pitch / roll joystick.
+     Replaced the four-button pad on 2026-08-29. Buttons made a proportional quantity into a
+     timing problem: to command 6 deg you had to hold for some number of milliseconds, by feel,
+     while watching a drifting drone. Thumb position is the angle now. -->
 <div class="group">
   <h2>Pitch / Roll</h2>
-  <div class="pad">
-    <div class="sp"></div>
-    <div class="btn" data-btn="pitch_forward">FWD</div>
-    <div class="sp"></div>
-    <div class="btn" data-btn="roll_left">LEFT</div>
-    <div class="sp"></div>
-    <div class="btn" data-btn="roll_right">RIGHT</div>
-    <div class="sp"></div>
-    <div class="btn" data-btn="pitch_back">BACK</div>
-    <div class="sp"></div>
+  <div class="stickwrap">
+    <div class="stick" id="stick">
+      <div class="stick-ring"></div>
+      <div class="stick-cross-h"></div>
+      <div class="stick-cross-v"></div>
+      <div class="stick-knob" id="stickKnob"></div>
+    </div>
+  </div>
+  <div class="row" style="justify-content:space-between;margin-top:8px">
+    <span style="font-size:12px;color:#8fa3c0">Stick&nbsp;&nbsp;<span id="s_stick"
+      style="font-variant-numeric:tabular-nums;color:#e6edf7;font-weight:600">0.00, 0.00</span></span>
+    <span style="font-size:12px;color:#8fa3c0">Cmd&nbsp;&nbsp;<span id="s_cmd"
+      style="font-variant-numeric:tabular-nums;color:#e6edf7;font-weight:600">0.0°, 0.0°</span></span>
   </div>
 </div>
 
@@ -270,6 +298,101 @@ function bindHold(el) {
 var padButtons = document.querySelectorAll('[data-btn]');
 for (var i = 0; i < padButtons.length; i++) bindHold(padButtons[i]);
 
+// --- Pitch / roll joystick -------------------------------------------------
+// Sends normalised displacement as jx/jy on every /api/input POST. The firmware owns the feel:
+// the expo curve, the 10 deg limit and the slew limit all live in control_state.c, so this is
+// deliberately a dumb input device that reports where the thumb is and nothing more.
+//
+// jx +1 = full right, jy +1 = full forward. Screen Y grows downwards, so the vertical axis is
+// negated below - up on the screen must mean forward.
+var stick = {x:0, y:0};
+
+(function() {
+  var pad = document.getElementById('stick');
+  var knob = document.getElementById('stickKnob');
+  var readout = document.getElementById('s_stick');
+  var cmdOut = document.getElementById('s_cmd');
+  var activeId = null;
+
+  // Must match ROLL_PITCH_EXPO / MAX_ROLL_PITCH_DEG in control_state.c. Only used to show the
+  // pilot what the firmware will do with the stick - nothing is transmitted from here.
+  var EXPO = 0.60, MAX_DEG = 10.0;
+  function expo(v) { return ((1 - EXPO) * v) + (EXPO * v * v * v); }
+
+  function render() {
+    var r = pad.clientWidth / 2;
+    // 0.88 keeps the knob centre on the dashed ring at full deflection rather than hanging
+    // off the edge of the circle.
+    knob.style.transform = 'translate(' + (stick.x * r * 0.88) + 'px,' +
+                                          (-stick.y * r * 0.88) + 'px)';
+    readout.textContent = stick.x.toFixed(2) + ', ' + stick.y.toFixed(2);
+    cmdOut.textContent = (expo(stick.x) * MAX_DEG).toFixed(1) + '°, ' +
+                         (expo(stick.y) * MAX_DEG).toFixed(1) + '°';
+  }
+
+  function setFromEvent(e) {
+    var box = pad.getBoundingClientRect();
+    var r = box.width / 2;
+    var x = (e.clientX - (box.left + r)) / r;
+    var y = -(e.clientY - (box.top + r)) / r;   // screen Y is inverted
+
+    // Clamp to the unit disc, matching control_state_set_stick(). Clamping each axis to
+    // [-1,1] independently would let a corner drag command 1.41x tilt on the diagonal.
+    var m = Math.sqrt(x * x + y * y);
+    if (m > 1) { x /= m; y /= m; }
+
+    stick.x = x;
+    stick.y = y;
+    render();
+  }
+
+  function centre() {
+    stick.x = 0;
+    stick.y = 0;
+    render();
+  }
+
+  pad.addEventListener('pointerdown', function(e) {
+    e.preventDefault();
+    activeId = e.pointerId;
+    pad.classList.add('active');
+    // Capture so the drag keeps tracking when the thumb leaves the circle - without this the
+    // stick would freeze at the edge mid-correction, which is the worst possible moment.
+    try { pad.setPointerCapture(e.pointerId); } catch (err) {}
+    setFromEvent(e);
+    sendInput();          // don't wait up to 50 ms for the next tick
+  });
+
+  pad.addEventListener('pointermove', function(e) {
+    if (activeId === null || e.pointerId !== activeId) return;
+    e.preventDefault();
+    setFromEvent(e);
+    // No POST here on purpose. The 20 Hz timer already carries the current position, and a
+    // move handler can fire at 120 Hz+ - posting per event would flood a link that is also
+    // carrying telemetry, and sendInput() would drop most of them anyway.
+  });
+
+  function endDrag(e) {
+    if (activeId === null || (e && e.pointerId !== activeId)) return;
+    if (e) e.preventDefault();
+    activeId = null;
+    pad.classList.remove('active');
+    centre();
+    sendInput();          // release the drone promptly
+  }
+
+  pad.addEventListener('pointerup', endDrag);
+  // pointercancel fires when the OS steals the gesture - a notification, an incoming call.
+  // Without it the stick latches at its last position and the drone flies away.
+  pad.addEventListener('pointercancel', endDrag);
+  pad.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+  // Exposed so releaseAll() can centre the stick along with the buttons.
+  window.__stickCentre = function() { activeId = null; pad.classList.remove('active'); centre(); };
+
+  render();
+})();
+
 // --- Release everything --------------------------------------------------
 // Called whenever the page loses focus. If the pilot switches apps or the phone locks, every
 // button must come up: the alternative is a drone that keeps flying in whatever direction was
@@ -279,6 +402,9 @@ function releaseAll() {
   for (var k in held) held[k] = false;
   var els = document.querySelectorAll('.btn.held');
   for (var i = 0; i < els.length; i++) els[i].classList.remove('held');
+  // The stick counts as a directional input too - leaving it deflected while the tab is hidden
+  // would keep the drone banked until the firmware's own 500 ms timeout caught it.
+  if (window.__stickCentre) window.__stickCentre();
 }
 
 // --- Screen wake lock ------------------------------------------------------
@@ -397,10 +523,15 @@ function sendInput() {
   var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   var killer = ctrl ? setTimeout(function(){ ctrl.abort(); }, INPUT_TIMEOUT_MS) : 0;
 
+  // Buttons plus the joystick in one frame. jx/jy ride along with the held flags so there is
+  // still exactly one control POST per tick and one browser watchdog to satisfy.
+  var frame = {jx: stick.x, jy: stick.y};
+  for (var k in held) frame[k] = held[k];
+
   var opts = {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(held)
+    body: JSON.stringify(frame)
   };
   if (ctrl) opts.signal = ctrl.signal;
 
@@ -534,9 +665,33 @@ function refresh() {
     } else if (!d.link) {
       banner.className = 'bad';
       banner.textContent = 'NO LINK TO FLIGHT CONTROLLER';
+    } else if (!d.fc_rx) {
+      // Status is arriving but the flight controller says it is NOT receiving our control
+      // frames. The two directions are separate wires, so this is a one-way link - and since
+      // the same UART task is successfully receiving in the other direction, it is the
+      // module -> FC wire, physically. A broken one of these cost a flight on 2026-08-29:
+      // telemetry looked perfectly healthy the whole time.
+      banner.className = 'bad';
+      banner.textContent = 'ONE-WAY LINK - FC not receiving control (check UART TX wire)';
     } else if (d.killed) {
       banner.className = 'bad';
-      banner.textContent = 'KILLED - disarm to reset';
+      // Spell out the escape. The latch clears only when kill is released AND arm is NOT being
+      // requested, so pressing ARM to recover is exactly what keeps it latched - the instinctive
+      // reaction is the one that does not work.
+      banner.textContent = 'KILLED - press DISARM to clear (ARM will not)';
+    } else if (armed && !d.armed) {
+      // We are asking to arm and the flight controller is refusing. It refuses silently, in four
+      // different places, so without this the banner cheerfully said "Ready to arm" while nothing
+      // happened. Everything needed to name the reason is already in /api/status.
+      banner.className = 'bad';
+      if (!d.attitude_init) {
+        banner.textContent = 'WILL NOT ARM - attitude still initialising, hold still';
+      } else if (d.throttle_trim >= 0.02) {
+        banner.textContent = 'WILL NOT ARM - lower ALT trim to 0 (now ' +
+                             Math.round(d.throttle_trim * 100) + '%)';
+      } else {
+        banner.textContent = 'WILL NOT ARM - flight controller refusing';
+      }
     } else if (d.armed) {
       banner.className = 'warn';
       banner.textContent = 'ARMED - MOTORS LIVE';

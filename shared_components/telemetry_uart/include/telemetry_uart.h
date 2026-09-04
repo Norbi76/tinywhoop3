@@ -71,6 +71,31 @@ typedef enum {
 #define TELEMETRY_STATUS_FLAG_VEL_VALID      (1u << 3) // nav_estimator body velocity is trustworthy.
 #define TELEMETRY_STATUS_FLAG_KILLED         (1u << 4) // Kill latch is engaged.
 
+// --- Saturation / health bits (added 2026-09-01) ----------------------------
+// These three exist to answer one question from a flight log: "was the controller in trouble,
+// and which kind?" All three are STICKY over one status period (20 ms at 50 Hz) - set if the
+// condition occurred on ANY of the ~20 inner-loop ticks since the last status frame, then
+// cleared when the frame is built. A level-sampled bit would miss almost everything, because
+// the inner loop runs 20x faster than the telemetry.
+//
+// Why they exist: flight_control_mix() degrades gracefully rather than clipping, which is the
+// correct behaviour but a SILENT one. The 2026-08-30 logs showed a level aircraft and a calm
+// angle loop while the mixer was quietly adding up to +0.15 of throttle the pilot never
+// commanded and shrinking the attitude command to make it fit. Nothing in the status frame
+// said so. These bits say so.
+//
+// No payload size change: bits 5-7 of the existing flags byte were free, so
+// telemetry_status_payload_t stays at 53 bytes and protocol.py's struct format is untouched.
+#define TELEMETRY_STATUS_FLAG_MIX_BOOST_CAP  (1u << 5) // Mixer needed more throttle headroom than MAX_MIXER_THROTTLE_BOOST allows.
+                                                       // While set, the aircraft is getting the full boost as an uncommanded thrust
+                                                       // pedestal and is at the edge of losing attitude authority (see next bit).
+#define TELEMETRY_STATUS_FLAG_MIX_SCALED     (1u << 6) // The attitude command was scaled DOWN to fit the motor band. Its direction
+                                                       // is preserved, its magnitude is not - the rate loops are not getting what
+                                                       // they asked for, and the effective gain is lower than the tuned value.
+#define TELEMETRY_STATUS_FLAG_ACCEL_REJECTED (1u << 7) // attitude_estimator gated the accelerometer out of the fusion (|a| outside
+                                                       // the 0.8-1.2 g window). Under power that means VIBRATION: the filter is
+                                                       // coasting on the gyro alone, so roll/pitch drift while this is set.
+
 // Represents the configuration for the UART interface(UART port, TX and RX pins, baud rate).
 typedef struct {
     uart_port_t uart_port;      

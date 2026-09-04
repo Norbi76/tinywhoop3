@@ -4,5 +4,7 @@ idf_component_register(SRCS "flight_control.c"
                     INCLUDE_DIRS "include"
                     REQUIRES pid_controller motor_driver attitude_estimator nav_estimator telemetry_uart esp_timer
                     # PRIVATE: the tuning registry is an implementation detail of the cascade -
-                    # nothing in flight_control.h mentions it.
-                    PRIV_REQUIRES pid_registry)
+                    # nothing in flight_control.h mentions it. Same for the battery monitor:
+                    # flight_control.h never mentions pack voltage, it only fills the field that
+                    # telemetry_uart.h had already defined.
+                    PRIV_REQUIRES pid_registry battery_monitor)

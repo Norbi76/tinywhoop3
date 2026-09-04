@@ -23,7 +23,6 @@
 //      inside fc_task - hence imu_ready_semaphore, which app_main blocks on before starting the
 //      navigation sensors.
 //
-// Some comments in this file are in Romanian (the author's first language) - intentional style.
 
 #include <stdio.h>
 #include <math.h>
@@ -38,6 +37,7 @@
 #include "attitude_estimator.h"
 #include "nav_estimator.h"
 #include "motor_driver.h"
+#include "battery_monitor.h"
 #include "flight_control.h"
 #include "pid_registry.h"
 #include "sensor_task.h"
@@ -53,6 +53,69 @@ static const char *TAG = "FC_MAIN";
 // samples/second, comfortably above the 500 Hz the ground station asks for at its fastest
 // setting, so the queue only backs up if the UART itself is the bottleneck.
 #define PID_DEBUG_PER_CYCLE 32
+
+// ===========================================================================
+// MOTOR BENCH MODE - measuring MOTOR_IDLE_THRUST
+//
+// Set MOTOR_BENCH_MODE to 1 and app_main() brings up the motor driver and NOTHING ELSE: no
+// IMU, no estimators, no flight control, no UART, no arming gate. Set it back to 0 before
+// flying. Left on by accident the firmware does not fly badly - it does not fly at all, which
+// is the failure mode you want from a switch like this.
+//
+// WHAT IT DOES
+//   Holds the motors at exactly BENCH_THRUST, cycling BENCH_ON_MS on and BENCH_OFF_MS off,
+//   forever. Nothing ramps and nothing changes on its own: the only number that reaches the
+//   motors is the one written below. To test another value, edit it, reflash, watch again.
+//
+// WHY IT CYCLES INSTEAD OF JUST HOLDING
+//   The quantity being measured is "does this motor start RELIABLY from a dead stop", and one
+//   successful start does not answer that. Every on-transition is a fresh start attempt from
+//   rest, so watching ten cycles gives ten trials. A motor that catches on eight of ten is
+//   telling you this thrust is below its real floor, which a single hold would hide completely.
+//
+// WHAT TO LOOK FOR
+//   All four motors starting on EVERY cycle, promptly, without a stutter or a nudge. A motor
+//   that hesitates, or starts on some cycles and not others, has not met the bar. The lowest
+//   value at which all four pass every cycle is the answer.
+//
+// PROPS STAY ON. Against the usual bench rule, deliberately: a coreless brushed motor needs
+//   materially more torque to start under a prop's load than bare, so a bare-shaft measurement
+//   returns a number that is too low - the same direction of error already in the code.
+//   RESTRAIN THE AIRFRAME and keep hands and face clear. BENCH_THRUST is never near hover, but
+//   restraint is still the only safe way to run this.
+//
+// SUGGESTED SEQUENCE (bisection - about four flashes rather than eight)
+//   0.12 is known to work: all four already start at it, since that is what the mixer floors
+//   them to today. So start below it and bisect.
+//
+//     0.06  -> all four start every cycle?  no  -> try 0.09
+//     0.09  -> all four start every cycle?  yes -> try 0.075
+//     0.075 -> ...                          no  -> try 0.08
+//     0.08  -> ...                          yes -> answer is 0.08
+//
+//   Then add a little margin for a tired pack and a cold motor: round UP, and prefer the value
+//   that still worked to the one that just barely did.
+//
+// PACK VOLTAGE MATTERS
+//   Start duty depends on pack voltage, so a value that passes on a full pack can fail on a
+//   half-empty one. Take the measurement on a freshly charged pack, and if a value is
+//   borderline, re-check it near the end of a pack before trusting it.
+// ===========================================================================
+#define MOTOR_BENCH_MODE 1
+
+// The thrust command under test. This is the ONLY value that reaches the motors.
+#define BENCH_THRUST 0.06f
+
+// Which motor: 0-3 for one on its own, or -1 for all four together.
+// All four together is usually what you want - they then see the same pack voltage at the same
+// instant, so a motor that needs more than its siblings shows up directly as the odd one out.
+#define BENCH_MOTOR (-1)
+
+// On and off times for one trial. 2.5 s on is long enough to see and hear clearly; 2 s off is
+// long enough for a coreless motor to come fully to rest, which is what makes the next
+// on-transition a genuine start from dead stop rather than a re-acceleration.
+#define BENCH_ON_MS  2500
+#define BENCH_OFF_MS 2000
 
 static SemaphoreHandle_t imu_data_mutex;
 static telemetry_imu_payload_t latest_imu_payload;
@@ -337,6 +400,62 @@ void telemetry_task(void *args) {
 //
 // The order below is load-bearing; the comment at each step says why that step is where it is.
 // Note the asymmetry in failure handling: anything that could let the motors run unsupervised
+#if MOTOR_BENCH_MODE
+// ---------------------------------------------------------------------------
+// Writes BENCH_THRUST to whichever motors are under test, or zero to stop them. Routed through
+// motor_set_thrust_all() rather than four separate writes so that all four channels update in
+// one pass - when comparing motors against each other, a stagger of even a few milliseconds
+// between them is one more thing to have to think about.
+// ---------------------------------------------------------------------------
+static void bench_drive(bool on)
+{
+    float thrust[MOTOR_COUNT] = {0};
+
+    if (on) {
+        for (int i = 0; i < MOTOR_COUNT; i++) {
+            if (BENCH_MOTOR < 0 || i == BENCH_MOTOR) {
+                thrust[i] = BENCH_THRUST;
+            }
+        }
+    }
+
+    motor_set_thrust_all(thrust);
+}
+
+// ---------------------------------------------------------------------------
+// The session: a ten-second pause so you can step back, then on/off cycles at BENCH_THRUST
+// until the board is powered down. The cycle number is logged if a serial cable happens to be
+// attached, but nothing here depends on that - the whole test is designed to be read by
+// watching the motors.
+// ---------------------------------------------------------------------------
+static void motor_bench_run(void)
+{
+    ESP_LOGW(TAG, "=== MOTOR BENCH MODE - this firmware does NOT fly ===");
+    ESP_LOGW(TAG, "Props ON, airframe RESTRAINED, hands and face clear.");
+
+    if (BENCH_MOTOR < 0) {
+        ESP_LOGI(TAG, "all four motors at thrust %.3f", (double)BENCH_THRUST);
+    } else {
+        ESP_LOGI(TAG, "motor M%d at thrust %.3f", BENCH_MOTOR, (double)BENCH_THRUST);
+    }
+    ESP_LOGI(TAG, "%d ms on / %d ms off, repeating. Watch for a start on EVERY cycle.",
+             BENCH_ON_MS, BENCH_OFF_MS);
+    ESP_LOGI(TAG, "Starting in 10 s.");
+
+    motor_all_stop();
+    vTaskDelay(pdMS_TO_TICKS(10000));
+
+    for (uint32_t cycle = 1; ; cycle++) {
+        ESP_LOGI(TAG, "cycle %lu: ON  (%.3f)", (unsigned long)cycle, (double)BENCH_THRUST);
+        bench_drive(true);
+        vTaskDelay(pdMS_TO_TICKS(BENCH_ON_MS));
+
+        bench_drive(false);
+        vTaskDelay(pdMS_TO_TICKS(BENCH_OFF_MS));
+    }
+}
+#endif  // MOTOR_BENCH_MODE
+
 // (motor driver, attitude estimator, flight control, UART) is FATAL and returns from app_main,
 // while the navigation sensors are non-fatal and simply leave the outer control loops disengaged.
 void app_main(void)
@@ -365,6 +484,25 @@ void app_main(void)
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "Motor driver init failed: %s", esp_err_to_name(error));
         return;
+    }
+
+#if MOTOR_BENCH_MODE
+    // Bench mode owns the board from here. Nothing below this line runs, so no sensor, no
+    // estimator and no control loop can touch the motors while the ramp is measuring them.
+    motor_bench_run();
+    return;
+#endif
+
+    // --- Battery monitor -----------------------------------------------------
+    // NON-FATAL by design, unlike everything else in this block. Pack voltage is telemetry, not
+    // control - nothing in the cascade reads it - so a dead ADC or an unfitted divider must not
+    // stop the aircraft flying. On failure battery_monitor_get_volts() reports the same 3.8 V
+    // nominal that flight_control.c hardcoded before the divider existed, which is exactly the
+    // behaviour this firmware had for its whole life up to 2026-09-03.
+    error = battery_monitor_init();
+    if (error != ESP_OK) {
+        ESP_LOGW(TAG, "Battery monitor unavailable (%s) - reporting nominal voltage",
+                 esp_err_to_name(error));
     }
 
     // --- Attitude estimator --------------------------------------------------
@@ -410,9 +548,9 @@ void app_main(void)
         NULL,
         1
     );
-    //de ce am ales core 1 pt task ul FC?
-    //Core 0 -> PRO_CPU(PROTOCOL CPU): ruleaza multe task uri de "fundal" cum ar fi accese la mem, alte functii legate de os
-    //Core 1 -> APP_CPU(APPLICATION CPU): este lasat mai liber
+    //Why core 1 for FC task ?
+    //Core 0 -> PRO_CPU(PROTOCOL CPU): does run many background tasks like memory access, other OS related functions etc...
+    //Core 1 -> APP_CPU(APPLICATION CPU): does run the application code, so we want our flight control task to run on this core to avoid any interruptions from background tasks.
 
     // --- Navigation sensors --------------------------------------------------
     // Wait for fc_task to finish imu_setup() and the calibration sweeps, because the VL53L1X

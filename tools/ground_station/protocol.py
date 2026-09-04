@@ -72,6 +72,31 @@ STATUS_FLAG_ALT_VALID = 1 << 2
 STATUS_FLAG_VEL_VALID = 1 << 3
 STATUS_FLAG_KILLED = 1 << 4
 
+# Saturation / health bits, added 2026-09-01. Sticky over one 20 ms status period on the flight
+# controller: set if the condition occurred on any inner-loop tick since the previous frame.
+# The payload struct did not change - these are bits 5-7 of the flags byte, which were free - so
+# S_STATUS below is untouched and old logs simply have them clear.
+STATUS_FLAG_MIX_BOOST_CAP = 1 << 5   # mixer wanted more headroom than MAX_MIXER_THROTTLE_BOOST
+STATUS_FLAG_MIX_SCALED = 1 << 6      # attitude command shrunk to fit the motor band
+STATUS_FLAG_ACCEL_REJECTED = 1 << 7  # accelerometer gated out of the fusion (vibration)
+
+STATUS_FLAG_NAMES = (
+    (STATUS_FLAG_LINK_OK, "LINK_OK"),
+    (STATUS_FLAG_ATTITUDE_INIT, "ATTITUDE_INIT"),
+    (STATUS_FLAG_ALT_VALID, "ALT_VALID"),
+    (STATUS_FLAG_VEL_VALID, "VEL_VALID"),
+    (STATUS_FLAG_KILLED, "KILLED"),
+    (STATUS_FLAG_MIX_BOOST_CAP, "MIX_BOOST_CAP"),
+    (STATUS_FLAG_MIX_SCALED, "MIX_SCALED"),
+    (STATUS_FLAG_ACCEL_REJECTED, "ACCEL_REJECTED"),
+)
+
+
+def status_flag_names(flags):
+    """Decode a status flags byte into a list of set bit names, for logs and reports."""
+    return [name for bit, name in STATUS_FLAG_NAMES if flags & bit]
+
+
 Loop = namedtuple("Loop", "id name block sp_unit out_unit rate divider")
 
 # The eight loops, in pid_loop_id_t order. `divider` is what gets sent in a PID_SELECT when this

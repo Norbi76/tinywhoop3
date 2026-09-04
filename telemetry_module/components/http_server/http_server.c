@@ -163,9 +163,20 @@ static esp_err_t handler_input(httpd_req_t *req) {
         .throttle_down = json_flag(body, "throttle_down"),
     };
 
-    // Only stores state. The ramp/decay integration happens on the 50 Hz UART TX task, so the
-    // setpoints advance at a fixed rate regardless of how irregularly these POSTs arrive.
+    // Only stores state. The integration happens on the 50 Hz UART TX task, so the setpoints
+    // advance at a fixed rate regardless of how irregularly these POSTs arrive.
     control_state_set_buttons(&buttons);
+
+    // Analogue joystick for roll and pitch (2026-08-29). Normalised displacement, [-1, +1].
+    //
+    // Defaulting to 0 is the important part: an older client, or a POST that arrived truncated,
+    // then commands CENTRE rather than silently holding the last stick position. Missing input
+    // must mean "level", never "carry on".
+    //
+    // control_state_set_stick() does the NaN rejection, the per-axis clamp and the unit-disc
+    // limit - this handler does not sanitise, because the firmware must not trust any client.
+    control_state_set_stick((float)json_number(body, "jx", 0.0),
+                            (float)json_number(body, "jy", 0.0));
 
     return send_json_ok(req);
 }
@@ -284,12 +295,30 @@ static esp_err_t handler_status(httpd_req_t *req) {
 
     // The link counts as up only if a status frame arrived recently. A stale frame from ten
     // seconds ago must not read as a healthy link.
+    //
+    // NOTE THIS ONLY MEASURES ONE DIRECTION: status frames arriving FC -> module. It says nothing
+    // about whether control frames are getting module -> FC. The two run on separate wires and
+    // can fail independently - see fc_rx below.
     const bool link = have_status && (status_age_ms >= 0) && (status_age_ms < 500);
 
-    char json[640];
+    // The FLIGHT CONTROLLER's own view of the link: is IT receiving our 50 Hz control frames?
+    //
+    // Added 2026-08-29 after a broken UART wire cost a flight. One of the two wires between the
+    // boards failed in the air. Status kept flowing FC -> module, so the dashboard showed a
+    // healthy link and sensible telemetry, while the flight controller heard nothing, tripped its
+    // own watchdog and disarmed. Afterwards ARM did nothing, because the request never arrived.
+    // Everything looked like a software fault and none of it was.
+    //
+    // link && !fc_rx is the exact signature of a ONE-WAY link, and it can only really mean the
+    // module -> FC direction is physically broken: same board, same task, same 50 Hz loop that is
+    // successfully receiving in the other direction.
+    const bool fc_rx = link && ((status.flags & TELEMETRY_STATUS_FLAG_LINK_OK) != 0);
+
+    char json[768];
     snprintf(json, sizeof(json),
              "{"
              "\"link\":%s,"
+             "\"fc_rx\":%s,"
              "\"armed\":%s,"
              "\"killed\":%s,"
              "\"attitude_init\":%s,"
@@ -310,6 +339,7 @@ static esp_err_t handler_status(httpd_req_t *req) {
              "\"rx_frames\":%lu,\"tx_frames\":%lu"
              "}",
              link ? "true" : "false",
+             fc_rx ? "true" : "false",
              (link && status.armed) ? "true" : "false",
              (status.flags & TELEMETRY_STATUS_FLAG_KILLED) ? "true" : "false",
              (status.flags & TELEMETRY_STATUS_FLAG_ATTITUDE_INIT) ? "true" : "false",

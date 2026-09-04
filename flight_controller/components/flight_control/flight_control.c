@@ -37,6 +37,7 @@
 #include "pid_controller.h"
 #include "pid_registry.h"
 #include "motor_driver.h"
+#include "battery_monitor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -120,7 +121,7 @@ static const char *TAG = "FLIGHT_CTRL";
 // How to measure: props OFF, arm, and use motor_set_thrust() to walk each motor up from 0
 // until all four start reliably from standstill. Take the worst motor, add margin.
 // ---------------------------------------------------------------------------
-#define MOTOR_IDLE_THRUST 0.12f
+#define MOTOR_IDLE_THRUST 0.06f
 
 // Cap on how much the mixer is allowed to raise the throttle to make room for an attitude
 // correction. Without a cap this becomes full "airmode": at low stick the mixer would keep
@@ -231,6 +232,19 @@ static uint32_t loop_rate_counter;
 
 // Cached status bits.
 static bool link_ok;
+
+// --- Sticky saturation / health latches (added 2026-09-01) ------------------
+// Set by the 1 kHz paths below, read and CLEARED by flight_control_get_status() at 50 Hz, so
+// each one means "this happened at least once in the last 20 ms". Sampling them at 50 Hz
+// instead would miss 19 ticks out of 20 and make an intermittent problem look absent.
+//
+// These are plain bools written at 1 kHz from the control task and cleared from whichever task
+// builds the status frame. A torn read is not possible for a bool on this target, and the worst
+// case race is losing or repeating a single bit for one 20 ms frame - acceptable for a
+// diagnostic, and not worth a critical section in the 1 kHz path.
+static bool mix_boost_capped_latch;   // mixer wanted more headroom than MAX_MIXER_THROTTLE_BOOST
+static bool mix_scaled_latch;         // attitude command was shrunk to fit the motor band
+static bool accel_rejected_latch;     // attitude estimator gated the accelerometer out
 
 static float clampf(float value, float min, float max) {
     if (value < min) return min;
@@ -366,6 +380,11 @@ esp_err_t flight_control_init(void) {
     link_ok = false;
     memset(&control_input, 0, sizeof(control_input));
     memset(motor_output, 0, sizeof(motor_output));
+
+    mix_boost_capped_latch = false;
+    mix_scaled_latch = false;
+    accel_rejected_latch = false;
+
     flight_control_reset_all_pids();
 
     ESP_LOGI(TAG, "Flight control ready: %d Hz inner, %d Hz mid, %d Hz outer",
@@ -446,6 +465,10 @@ static void flight_control_mix(float throttle, float roll, float pitch, float ya
         }
         mix_min *= scale;
         mix_max *= scale;
+
+        // The attitude loops asked for a wider spread than the motors can produce at ANY
+        // throttle. Reported as MIX_SCALED - see telemetry_uart.h.
+        mix_scaled_latch = true;
     }
 
     // --- Step 2: place the throttle so nothing falls off either end ----------
@@ -462,8 +485,19 @@ static void flight_control_mix(float throttle, float roll, float pitch, float ya
         // Bounded boost: see MAX_MIXER_THROTTLE_BOOST. If the cap bites, the low motors do end
         // up below idle and get clamped below - a deliberate trade so that holding ALT- always
         // produces a real descent.
-        const float boost = clampf(lowest_allowed - placed_throttle, 0.0f, MAX_MIXER_THROTTLE_BOOST);
+        const float wanted_boost = lowest_allowed - placed_throttle;
+        const float boost = clampf(wanted_boost, 0.0f, MAX_MIXER_THROTTLE_BOOST);
         placed_throttle += boost;
+
+        // The cap bit: the mixer could not buy all the headroom it wanted. Two things are true
+        // whenever this is set, and neither is visible anywhere else in the telemetry:
+        //   - the aircraft is receiving the FULL boost as thrust the pilot did not command;
+        //   - step 3 below is about to shrink the attitude command, because the room still
+        //     is not there.
+        // Reported as MIX_BOOST_CAP - see telemetry_uart.h.
+        if (wanted_boost > MAX_MIXER_THROTTLE_BOOST) {
+            mix_boost_capped_latch = true;
+        }
     }
 
     if (placed_throttle > highest_allowed) {
@@ -489,6 +523,13 @@ static void flight_control_mix(float throttle, float roll, float pitch, float ya
     }
     if (fit < 0.0f) {
         fit = 0.0f;   // throttle is below the idle floor entirely: no room either way
+    }
+
+    // fit < 1 means the rate loops are being obeyed in DIRECTION but not in MAGNITUDE, i.e. the
+    // effective loop gain right now is lower than the gain you tuned. Tuning taken while this
+    // is set does not transfer to flight where it is clear. Reported as MIX_SCALED.
+    if (fit < 1.0f) {
+        mix_scaled_latch = true;
     }
 
     // With the three steps above nothing should land outside [0, 1]; this clamp is a safety
@@ -716,6 +757,13 @@ static void flight_control_inner_loop(const attitude_state_t *attitude, float dt
 static void flight_control_stop_motors(void) {
     motor_all_stop();
     memset(motor_output, 0, sizeof(motor_output));
+
+    // With the motors off the mixer is not running, so leaving a mixer latch set would report
+    // saturation that is no longer happening. The accelerometer latch is deliberately NOT
+    // cleared here: the estimator keeps running while disarmed, and a vibration reading taken
+    // with the drone held by hand is still a real reading.
+    mix_boost_capped_latch = false;
+    mix_scaled_latch = false;
 }
 
 #if FLIGHT_CONTROL_MONITOR_WHEN_DISARMED
@@ -746,6 +794,18 @@ void flight_control_update(const attitude_state_t *attitude, const nav_state_t *
     if (attitude == NULL || dt <= 0.0f) {
         flight_control_stop_motors();
         return;
+    }
+
+    // Latch accelerometer rejection at the full 1 kHz, BEFORE the arming gate, so the bit works
+    // with the drone disarmed in your hand and with the props spinning on a bench rig - both of
+    // which are how you find a vibration problem without risking the airframe.
+    //
+    // attitude_estimator sets accel_valid=false when |a| leaves the 0.8-1.2 g window and coasts
+    // on the gyro for that sample. One rejected sample is normal; a bit that is set on most
+    // status frames while the motors are running means vibration is knocking the accelerometer
+    // out of the fusion, and roll/pitch are drifting with nothing to correct them.
+    if (!attitude->accel_valid) {
+        accel_rejected_latch = true;
     }
 
     const int64_t now_us = esp_timer_get_time();
@@ -859,10 +919,18 @@ void flight_control_get_status(telemetry_status_payload_t *out) {
     out->velocity_x = nav.velocity_x;
     out->velocity_y = nav.velocity_y;
 
-    // There is no ADC divider on the pack and none is planned, so this is a fixed nominal value
-    // purely to keep the dashboard's battery field populated - it is NOT a measurement and it
-    // will not fall as the pack drains. Nothing in the control path reads it.
-    out->battery_voltage = 3.8f;
+    // Pack voltage, from the divider added 2026-09-03. Was a hardcoded 3.8f before that.
+    //
+    // battery_monitor rate-limits its own ADC sampling to 10 Hz internally, so calling it on
+    // every 50 Hz status frame is a comparison and a float read - see battery_monitor.h. If the
+    // divider is missing or the ADC failed to come up it returns the same 3.8 V nominal this
+    // line used to hardcode, so nothing downstream has to special-case it.
+    //
+    // STILL NOT IN THE CONTROL PATH. No thrust compensation and no low-voltage cutoff read this;
+    // it goes to the status frame and the dashboard tile only. Until BATTERY_TRIM has been
+    // measured against a multimeter the number is indicative rather than calibrated, and a
+    // threshold on an uncalibrated reading is worse than no threshold.
+    out->battery_voltage = battery_monitor_get_volts();
 
     for (int i = 0; i < MOTOR_COUNT; i++) {
         out->motor[i] = motor_output[i];
@@ -897,6 +965,18 @@ void flight_control_get_status(telemetry_status_payload_t *out) {
     if (nav.altitude_valid)    out->flags |= TELEMETRY_STATUS_FLAG_ALT_VALID;
     if (nav.velocity_valid)    out->flags |= TELEMETRY_STATUS_FLAG_VEL_VALID;
     if (kill_latched)          out->flags |= TELEMETRY_STATUS_FLAG_KILLED;
+
+    // --- Sticky latches: report, then clear -----------------------------------
+    // Read-and-clear is what makes these mean "at least once in the last 20 ms" rather than
+    // "at this instant". Clearing here rather than at the top of the inner loop means a
+    // condition that occurs between this call and the next status frame is still caught.
+    if (mix_boost_capped_latch) out->flags |= TELEMETRY_STATUS_FLAG_MIX_BOOST_CAP;
+    if (mix_scaled_latch)       out->flags |= TELEMETRY_STATUS_FLAG_MIX_SCALED;
+    if (accel_rejected_latch)   out->flags |= TELEMETRY_STATUS_FLAG_ACCEL_REJECTED;
+
+    mix_boost_capped_latch = false;
+    mix_scaled_latch = false;
+    accel_rejected_latch = false;
 }
 
 bool flight_control_is_armed(void) {

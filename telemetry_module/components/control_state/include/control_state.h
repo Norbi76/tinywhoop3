@@ -43,11 +43,17 @@
 // moment you stop pressing, which is unflyable with a button interface.
 
 // Which directional buttons are currently held. Sent by the dashboard 20 times a second.
+//
+// NOTE (2026-08-29): the four roll/pitch fields are NO LONGER USED. Roll and pitch now come from
+// the dashboard's analogue joystick via control_state_set_stick(). The fields are kept so the wire
+// format and the HTTP handler do not have to change, and so a keyboard or button fallback could be
+// reintroduced without touching the protocol - but control_state_update() ignores them. Yaw and
+// throttle are still button-driven, and deliberately so: see the joystick comment in the .c file.
 typedef struct {
-    bool pitch_forward;
-    bool pitch_back;
-    bool roll_left;
-    bool roll_right;
+    bool pitch_forward;   // IGNORED - joystick owns pitch
+    bool pitch_back;      // IGNORED
+    bool roll_left;       // IGNORED - joystick owns roll
+    bool roll_right;      // IGNORED
     bool yaw_left;
     bool yaw_right;
     bool throttle_up;
@@ -62,6 +68,23 @@ esp_err_t control_state_init(void);
 // Called from the /api/input HTTP handler.
 // @param buttons The button state. NULL is ignored.
 void control_state_set_buttons(const control_buttons_t *buttons);
+
+// Records the analogue joystick position that drives ROLL and PITCH, and resets the browser
+// watchdog. Called from the /api/input HTTP handler alongside control_state_set_buttons().
+//
+// Both axes are normalised stick displacement in [-1, +1] and are clamped to the unit DISC, not
+// the unit square: a diagonal push must not command 1.41x the tilt of a straight one.
+//
+//   x  +1 = full right   (roll right, right wing down)
+//   y  +1 = full forward (pitch forward, nose down -> the drone moves forward)
+//
+// The expo curve, the degree limit and the slew limit are all applied in control_state_update(),
+// not here - the dashboard sends raw displacement and the firmware owns the feel, so every client
+// gets identical behaviour and there is one place to tune.
+//
+// @param x Roll displacement, [-1, +1]. Non-finite values are treated as 0.
+// @param y Pitch displacement, [-1, +1]. Non-finite values are treated as 0.
+void control_state_set_stick(float x, float y);
 
 // Sets the arm request. The flight controller applies its own arming gate on top of this.
 void control_state_set_arm(bool armed);

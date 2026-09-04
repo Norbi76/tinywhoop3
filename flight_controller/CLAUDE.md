@@ -151,9 +151,15 @@ Both navigation sensors are optional at build time *and* at runtime, and the cha
 sensor missing → `nav_estimator` validity flag false → `flight_control` disengages that outer loop
 → **the drone stays flyable in angle mode**. `sensor_task_init()` warns and continues on either
 failure. `vl53l1x_driver` even builds without ST's ULD sources present (see its `CMakeLists.txt`),
-and `pmw3901_driver`'s ~80-register init sequence is a **deliberate stub** — it returns
-`ESP_ERR_NOT_SUPPORTED` and the velocity loop simply never engages. Don't "fix" any of these by
-making them fatal.
+and `pmw3901_init()` returns an error rather than aborting on any failure it can hit — a failed SPI
+bring-up, a product-ID mismatch (`ESP_ERR_NOT_FOUND`), or a failed register write — after which
+`sensor_available` stays false and the velocity loop simply never engages. Don't "fix" any of these
+by making them fatal.
+
+Note the PMW3901's ~80-register init sequence is **no longer a stub**. It is written from
+`pmw3901_init_registers.h` (PixArt's power-up table, transcribed from Bitcraze), so the
+unconditional `ESP_ERR_NOT_SUPPORTED` that used to keep the velocity loop permanently disengaged is
+gone, and the loop can now genuinely engage when the sensor is fitted and reporting good `squal`.
 
 ## Things that need bench verification before flight
 
