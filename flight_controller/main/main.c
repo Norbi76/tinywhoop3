@@ -101,7 +101,7 @@ static const char *TAG = "FC_MAIN";
 //   half-empty one. Take the measurement on a freshly charged pack, and if a value is
 //   borderline, re-check it near the end of a pack before trusting it.
 // ===========================================================================
-#define MOTOR_BENCH_MODE 1
+#define MOTOR_BENCH_MODE 0
 
 // The thrust command under test. This is the ONLY value that reaches the motors.
 #define BENCH_THRUST 0.06f
