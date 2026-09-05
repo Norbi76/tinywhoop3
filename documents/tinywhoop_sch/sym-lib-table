@@ -1,0 +1,7 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "Seeed_Studio_XIAO_Series") (type "KiCad") (uri "/home/nrib/Desktop/kicad_sym/XIAO_Series_SCH_Symbols/Seeed_Studio_XIAO_Series.kicad_sym") (options "") (descr ""))
+	(lib (name "Seeed_Studio_XIAO_Series_sense") (type "KiCad") (uri "/home/nrib/Desktop/kicad_sym/XIAO_Series_SCH_Symbols(1)/Seeed_Studio_XIAO_Series_sense.kicad_sym") (options "") (descr ""))
+	(lib (name "engemil_pmw3901mb_module_symbol_library") (type "KiCad") (uri "/home/nrib/Downloads/engemil_pmw3901mb_module_symbol_library.kicad_sym") (options "") (descr ""))
+	(lib (name "2026-09-05_15-29-02") (type "KiCad") (uri "/home/nrib/Downloads/ul_BAT165E6327HTSA1/KiCADv6/2026-09-05_15-29-02.kicad_sym") (options "") (descr ""))
+)
