@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" font-family="Arial, Helvetica, sans-serif">
+
+<defs>
+  <marker id="arw" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+    <path d="M0,0 L8,3 L0,6 z" fill="#333"/>
+  </marker>
+  <marker id="arwd" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto">
+    <path d="M0,0 L8,3 L0,6 z" fill="#b8762a"/>
+  </marker>
+</defs>
+
+<rect width="1600" height="1000" fill="#ffffff"/>
+
+<!-- ================= TITLE ================= -->
+<text x="800" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#1f3864">Arhitectura de control PID în cascadă</text>
+<text x="800" y="56" text-anchor="middle" font-size="12" fill="#555">Cascadă pe trei niveluri: viteză orizontala→ unghi de orientare → viteză unghiulară, cu o buclă paralelă de altitudine. Punctele de referință ajung de la tabloul web prin UART la 50 Hz.</text>
+
+<!-- ================= SETPOINTS ================= -->
+<text x="30" y="120" font-size="11" font-weight="bold" fill="#1f3864">PUNCTE DE REFERINTA</text>
+<text x="30" y="144" font-size="11" fill="#222">climb_rate_sp</text>
+<line x1="120" y1="140" x2="168" y2="140" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<text x="30" y="304" font-size="11" fill="#222">vx_sp , vy_sp</text>
+<line x1="112" y1="300" x2="138" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<text x="30" y="464" font-size="11" fill="#222">yaw_rate_sp</text>
+<line x1="118" y1="460" x2="643" y2="460" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<!-- <text x="250" y="482" font-size="9" font-style="italic" fill="#777">fără magnetometru → viraj comandat direct ca viteză unghiulară (fără buclă de unghi de orientare)</text> -->
+
+<!-- ================= SUMMING JUNCTIONS ================= -->
+<!-- Sigma altitude -->
+<circle cx="185" cy="140" r="13" fill="#fff" stroke="#333" stroke-width="1.6"/>
+<line x1="176" y1="131" x2="194" y2="149" stroke="#333" stroke-width="1"/>
+<line x1="194" y1="131" x2="176" y2="149" stroke="#333" stroke-width="1"/>
+<text x="168" y="128" font-size="11" fill="#333">+</text>
+<text x="196" y="170" font-size="12" fill="#333">−</text>
+
+<!-- Sigma velocity -->
+<circle cx="155" cy="300" r="13" fill="#fff" stroke="#333" stroke-width="1.6"/>
+<line x1="146" y1="291" x2="164" y2="309" stroke="#333" stroke-width="1"/>
+<line x1="164" y1="291" x2="146" y2="309" stroke="#333" stroke-width="1"/>
+<text x="138" y="288" font-size="11" fill="#333">+</text>
+<text x="166" y="330" font-size="12" fill="#333">−</text>
+
+<!-- Sigma angle -->
+<circle cx="400" cy="300" r="13" fill="#fff" stroke="#333" stroke-width="1.6"/>
+<line x1="391" y1="291" x2="409" y2="309" stroke="#333" stroke-width="1"/>
+<line x1="409" y1="291" x2="391" y2="309" stroke="#333" stroke-width="1"/>
+<text x="383" y="288" font-size="11" fill="#333">+</text>
+<text x="411" y="330" font-size="12" fill="#333">−</text>
+
+<!-- Sigma rate roll/pitch -->
+<circle cx="630" cy="300" r="13" fill="#fff" stroke="#333" stroke-width="1.6"/>
+<line x1="621" y1="291" x2="639" y2="309" stroke="#333" stroke-width="1"/>
+<line x1="639" y1="291" x2="621" y2="309" stroke="#333" stroke-width="1"/>
+<text x="613" y="288" font-size="11" fill="#333">+</text>
+<text x="641" y="330" font-size="12" fill="#333">−</text>
+
+<!-- Sigma rate yaw -->
+<circle cx="660" cy="460" r="13" fill="#fff" stroke="#333" stroke-width="1.6"/>
+<line x1="651" y1="451" x2="669" y2="469" stroke="#333" stroke-width="1"/>
+<line x1="669" y1="451" x2="651" y2="469" stroke="#333" stroke-width="1"/>
+<text x="643" y="448" font-size="11" fill="#333">+</text>
+<text x="671" y="490" font-size="12" fill="#333">−</text>
+
+<!-- ================= CONTROL BLOCKS ================= -->
+<!-- Altitude PID -->
+<rect x="220" y="109" width="150" height="62" rx="3" fill="#d6e4f0" stroke="#1f3864" stroke-width="1.6"/>
+<text x="295" y="130" text-anchor="middle" font-size="13" font-weight="bold" fill="#1f3864">PID ALTITUDINE</text>
+<text x="295" y="146" text-anchor="middle" font-size="10" fill="#333">alt[m] → comanda propulsie</text>
+<text x="295" y="161" text-anchor="middle" font-size="10" font-style="italic" fill="#666">50 Hz</text>
+<line x1="198" y1="140" x2="216" y2="140" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="370" y1="140" x2="886" y2="140" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<text x="620" y="132" text-anchor="middle" font-size="10" fill="#333">linie de bază a accelerației</text>
+
+<!-- Velocity PIDs -->
+<rect x="195" y="269" width="145" height="62" rx="3" fill="#d6e4f0" stroke="#1f3864" stroke-width="1.6"/>
+<text x="267" y="290" text-anchor="middle" font-size="10" font-weight="bold" fill="#1f3864">PID VITEZĂ ORIZONTALA</text>
+<text x="267" y="306" text-anchor="middle" font-size="10" fill="#333">vx, vy [m/s] → unghi [grade]</text>
+<text x="267" y="321" text-anchor="middle" font-size="10" font-style="italic" fill="#666">50 Hz</text>
+<line x1="168" y1="300" x2="191" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="340" y1="300" x2="383" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<!-- text x="361" y="292" text-anchor="middle" font-size="9" fill="#333">φ_sp , θ_sp</text> -->
+
+<!-- Angle PIDs -->
+<rect x="435" y="269" width="145" height="62" rx="3" fill="#dce6f2" stroke="#1f3864" stroke-width="1.6"/>
+<text x="507" y="290" text-anchor="middle" font-size="13" font-weight="bold" fill="#1f3864">PID UNGHI</text>
+<text x="507" y="301" text-anchor="middle" font-size="10" fill="#333">ruliu, tangaj [grade] →</text>
+<text x="507" y="313" text-anchor="middle" font-size="10" fill="#333">viteză unghiulara [deg/s]</text>
+
+<text x="507" y="325" text-anchor="middle" font-size="10" font-style="italic" fill="#666">250 Hz</text>
+<line x1="413" y1="300" x2="431" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="580" y1="300" x2="613" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<!-- <text x="596" y="292" text-anchor="middle" font-size="9" fill="#333">p_sp , q_sp</text> -->
+
+<!-- Rate PIDs -->
+<rect x="700" y="265" width="150" height="230" rx="3" fill="#cfdcec" stroke="#1f3864" stroke-width="1.8"/>
+<text x="775" y="340" text-anchor="middle" font-size="13" font-weight="bold" fill="#1f3864">PID</text>
+<text x="775" y="358" text-anchor="middle" font-size="13" font-weight="bold" fill="#1f3864">VITEZĂ UNGHIULARA</text>
+<text x="775" y="375" text-anchor="middle" font-size="10" fill="#333">viteză unghiulara [deg/s] →</text>
+<text x="775" y="387" text-anchor="middle" font-size="10" fill="#333">contributie mixer</text>
+
+<!-- <text x="775" y="392" text-anchor="middle" font-size="10" fill="#333">acționat de giroscop</text> -->
+<text x="775" y="409" text-anchor="middle" font-size="10" font-style="italic" fill="#666">1 kHz</text>
+<line x1="643" y1="300" x2="696" y2="300" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="673" y1="460" x2="696" y2="460" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<!-- Mixer -->
+<rect x="890" y="110" width="115" height="400" rx="3" fill="#c3d5e8" stroke="#1f3864" stroke-width="1.8"/>
+<text x="947" y="150" text-anchor="middle" font-size="12" font-weight="bold" fill="#1f3864">AMESTECATOR</text>
+<text x="947" y="166" text-anchor="middle" font-size="12" font-weight="bold" fill="#1f3864">DE MOTOARE</text>
+<text x="947" y="188" text-anchor="middle" font-size="10" fill="#333">X-quad</text>
+<text x="947" y="286" text-anchor="middle" font-size="9" fill="#222">FL = T +R −P +Y</text>
+<text x="947" y="302" text-anchor="middle" font-size="9" fill="#222">FR = T −R −P −Y</text>
+<text x="947" y="318" text-anchor="middle" font-size="9" fill="#222">RL = T +R +P −Y</text>
+<text x="947" y="334" text-anchor="middle" font-size="9" fill="#222">RR = T −R +P +Y</text>
+<line x1="850" y1="380" x2="886" y2="380" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<text x="868" y="372" text-anchor="middle" font-size="9" fill="#333">R,P,Y</text>
+
+<!-- Motor drive chain -->
+<rect x="1055" y="197" width="150" height="60" rx="3" fill="#e6e6e6" stroke="#555" stroke-width="1.5"/>
+<text x="1130" y="221" text-anchor="middle" font-size="11" font-weight="bold" fill="#333">PREVENTIE SATURARE</text>
+<text x="1130" y="238" text-anchor="middle" font-size="9" fill="#444">scalează toate 4 dacă</text>
+<text x="1130" y="252" text-anchor="middle" font-size="9" fill="#444">sse limitează vreuna</text>
+
+
+<rect x="1055" y="385" width="150" height="68" rx="3" fill="#e6e6e6" stroke="#555" stroke-width="1.5"/>
+<text x="1130" y="407" text-anchor="middle" font-size="11" font-weight="bold" fill="#333">COMANDA PWM MOTOARE</text>
+<text x="1130" y="424" text-anchor="middle" font-size="9" fill="#444">24 kHz · 11 biți · 4 canale</text>
+<text x="1130" y="439" text-anchor="middle" font-size="9" fill="#444">→ MOSFET-uri N-canale</text>
+
+<path d="M1005,310 L1030,310 L1030,227 L1051,227" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="1130" y1="257" x2="1130" y2="381" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+<line x1="1205" y1="419" x2="1261" y2="419" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<!-- Plant -->
+<rect x="1265" y="300" width="200" height="170" rx="3" fill="#fbe3c8" stroke="#b8762a" stroke-width="1.8"/>
+<text x="1365" y="336" text-anchor="middle" font-size="12" font-weight="bold" fill="#8a5518">DINAMICA</text>
+<text x="1365" y="353" text-anchor="middle" font-size="12" font-weight="bold" fill="#8a5518">DRONEI</text>
+<text x="1365" y="381" text-anchor="middle" font-size="9.5" fill="#5a4020">4 motoare cu perii</text>
+<text x="1365" y="397" text-anchor="middle" font-size="9.5" fill="#5a4020">elice de 55 mm</text>
+<text x="1365" y="413" text-anchor="middle" font-size="9.5" fill="#5a4020">GREUTATE TOTALĂ ≈ 100 g, LiPo 1S</text>
+
+<!-- Disturbance -->
+<text x="1365" y="240" text-anchor="middle" font-size="10" font-style="italic" fill="#b8762a">curenți de aer interni · efect de sol · asimetrie a motoarelor</text>
+<line x1="1365" y1="250" x2="1365" y2="296" stroke="#b8762a" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#arwd)"/>
+
+<!-- Plant output -->
+<line x1="1465" y1="385" x2="1545" y2="385" stroke="#333" stroke-width="1.6"/>
+
+<!-- ================= SENSORS ================= -->
+<rect x="1265" y="590" width="200" height="150" rx="3" fill="#dff0d8" stroke="#3c763d" stroke-width="1.8"/>
+<text x="1365" y="616" text-anchor="middle" font-size="12" font-weight="bold" fill="#2b542c">SENZORI</text>
+<text x="1365" y="644" text-anchor="middle" font-size="9.5" fill="#2b542c">MPU6500 (I²C) — accel + giroscop</text>
+<text x="1365" y="666" text-anchor="middle" font-size="9.5" fill="#2b542c">PMW3901 (SPI) — flux optic</text>
+<text x="1365" y="688" text-anchor="middle" font-size="9.5" fill="#2b542c">VL53L1X (I²C) — altitudine ToF</text>
+
+<path d="M1545,385 L1545,665 L1469,665" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<!-- ================= ESTIMATOR ================= -->
+<rect x="680" y="790" width="520" height="115" rx="3" fill="#ece0f2" stroke="#6b4c8a" stroke-width="1.8"/>
+<text x="940" y="815" text-anchor="middle" font-size="12" font-weight="bold" fill="#4e3568">ESTIMATOR DE STARE — sensor_task @ 100 Hz</text>
+<text x="940" y="838" text-anchor="middle" font-size="9.5" fill="#3f2b55">filtru complementar (accel + giroscop) → ruliu , tangaj </text>
+<text x="940" y="857" text-anchor="middle" font-size="9.5" fill="#3f2b55">ToF → altitudine , derivată → rată de ascensiune </text>
+<text x="940" y="876" text-anchor="middle" font-size="9.5" fill="#3f2b55">flux , compensat cu giroscop → viteză vx , vy</text>
+<text x="940" y="895" text-anchor="middle" font-size="9" font-style="italic" fill="#6b4c8a">respinge măsurătorile cu calitate scăzută a suprafeței de flux sau stare defectuoasă a distanței ToF</text>
+
+<path d="M1365,740 L1365,847 L1204,847" fill="none" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+
+<!-- ================= FEEDBACK BUS ================= -->
+<line x1="680" y1="847" x2="155" y2="847" stroke="#333" stroke-width="1.6"/>
+
+<!-- feedback: altitude -->
+<line x1="185" y1="847" x2="185" y2="157" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
+<!-- <text x="192" y="700" font-size="9.5" fill="#333">z , ż</text> -->
+<!-- feedback: velocity -->
+<line x1="155" y1="847" x2="155" y2="317" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
+<!-- <text x="108" y="760" font-size="9.5" fill="#333">vx , vy</text> -->
+<!-- feedback: attitude -->
+<line x1="400" y1="847" x2="400" y2="317" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
+<!-- <text x="407" y="760" font-size="9.5" fill="#333">φ , θ</text> -->
+<!-- feedback: body rates roll/pitch -->
+<line x1="630" y1="847" x2="630" y2="317" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
+<!-- <text x="637" y="760" font-size="9.5" fill="#333">p , q  (giroscop)</text> -->
+<!-- feedback: yaw rate -->
+<line x1="660" y1="847" x2="660" y2="477" stroke="#333" stroke-width="1.4" marker-end="url(#arw)"/>
+<!-- <text x="667" y="700" font-size="9.5" fill="#333">r  (giroscop)</text> -->
+
+<!-- ================= LOOP LABELS ================= -->
+<text x="267" y="253" text-anchor="middle" font-size="10" font-weight="bold" fill="#7a7a7a">BUCLĂ EXTERIOARĂ</text>
+<text x="507" y="253" text-anchor="middle" font-size="10" font-weight="bold" fill="#7a7a7a">BUCLĂ INTERMEDIARĂ</text>
+<text x="775" y="253" text-anchor="middle" font-size="10" font-weight="bold" fill="#7a7a7a">BUCLĂ INTERIOARĂ</text>
+
+<!-- ================= FOOTNOTE ================= -->
+<!-- <text x="30" y="950" font-size="9.5" fill="#666">Albastru: legea de control executată pe ESP32-S3 al controlerului de zbor (FreeRTOS, nucleul 1).   Gri: lanțul de acționare a motoarelor.   Verde: senzori.   Violet: estimarea stării (nucleul 0).   Portocaliu: plantă fizică.</text> -->
+<text x="30" y="968" font-size="9.5" fill="#666">Fiecare buclă exterioară rulează de cel puțin 4× mai lent decât bucla pe care o comandă. Toate instanțele PID folosesc derivată față de măsurare, D filtrată și anti-windup cu integrare condițională.</text>
+
+</svg>
